@@ -426,13 +426,10 @@ class StudentManagementAPITester:
             return False
             
         try:
-            params = {
-                "course_id": self.test_data["course_id"],
-                "branch_id": self.test_data["branch_id"],
-                "valid_minutes": 30
-            }
+            # QR generation endpoint expects query parameters
+            endpoint = f"/attendance/generate-qr?course_id={self.test_data['course_id']}&branch_id={self.test_data['branch_id']}&valid_minutes=30"
             
-            response = self.make_request("POST", "/attendance/generate-qr", params, auth_token=self.tokens["super_admin"])
+            response = self.make_request("POST", endpoint, {}, auth_token=self.tokens["super_admin"])
             
             if response.status_code == 200:
                 data = response.json()
