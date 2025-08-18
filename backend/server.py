@@ -19,6 +19,7 @@ import base64
 from enum import Enum
 import secrets
 import re
+from bson import ObjectId
 
 # Load environment variables
 ROOT_DIR = Path(__file__).parent
