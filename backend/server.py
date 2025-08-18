@@ -634,7 +634,7 @@ async def get_branch(
     branch = await db.branches.find_one({"id": branch_id})
     if not branch:
         raise HTTPException(status_code=404, detail="Branch not found")
-    return branch
+    return serialize_doc(branch)
 
 @api_router.put("/branches/{branch_id}")
 async def update_branch(
