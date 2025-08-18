@@ -682,4 +682,612 @@ async def update_course(
     
     return {"message": "Course updated successfully"}
 
-# Continue in next part due to length...
+# STUDENT ENROLLMENT ENDPOINTS
+@api_router.post("/enrollments")
+async def create_enrollment(
+    enrollment_data: EnrollmentCreate,
+    current_user: dict = Depends(require_role([UserRole.SUPER_ADMIN, UserRole.COACH_ADMIN]))
+):
+    """Create student enrollment"""
+    # Validate student, course, and branch exist
+    student = await db.users.find_one({"id": enrollment_data.student_id, "role": "student"})
+    if not student:
+        raise HTTPException(status_code=404, detail="Student not found")
+    
+    course = await db.courses.find_one({"id": enrollment_data.course_id})
+    if not course:
+        raise HTTPException(status_code=404, detail="Course not found")
+    
+    branch = await db.branches.find_one({"id": enrollment_data.branch_id})
+    if not branch:
+        raise HTTPException(status_code=404, detail="Branch not found")
+    
+    # Calculate end date
+    end_date = enrollment_data.start_date + timedelta(days=course["duration_months"] * 30)
+    
+    enrollment = Enrollment(
+        **enrollment_data.dict(),
+        end_date=end_date,
+        next_due_date=enrollment_data.start_date + timedelta(days=30)
+    )
+    
+    await db.enrollments.insert_one(enrollment.dict())
+    
+    # Create initial payment records
+    admission_payment = Payment(
+        student_id=enrollment_data.student_id,
+        enrollment_id=enrollment.id,
+        amount=enrollment_data.admission_fee,
+        payment_type="admission_fee",
+        payment_method="pending",
+        payment_status=PaymentStatus.PENDING,
+        due_date=datetime.utcnow() + timedelta(days=7)
+    )
+    
+    course_payment = Payment(
+        student_id=enrollment_data.student_id,
+        enrollment_id=enrollment.id,
+        amount=enrollment_data.fee_amount,
+        payment_type="course_fee",
+        payment_method="pending", 
+        payment_status=PaymentStatus.PENDING,
+        due_date=enrollment_data.start_date
+    )
+    
+    await db.payments.insert_many([admission_payment.dict(), course_payment.dict()])
+    
+    # Send enrollment confirmation
+    await send_whatsapp(student["phone"], f"Welcome! You're enrolled in {course['name']}. Start date: {enrollment_data.start_date.date()}")
+    
+    return {"message": "Enrollment created successfully", "enrollment_id": enrollment.id}
+
+@api_router.get("/enrollments")
+async def get_enrollments(
+    student_id: Optional[str] = None,
+    course_id: Optional[str] = None,
+    branch_id: Optional[str] = None,
+    skip: int = 0,
+    limit: int = 50,
+    current_user: dict = Depends(get_current_active_user)
+):
+    """Get enrollments with filtering"""
+    filter_query = {}
+    if student_id:
+        filter_query["student_id"] = student_id
+    if course_id:
+        filter_query["course_id"] = course_id
+    if branch_id:
+        filter_query["branch_id"] = branch_id
+    
+    # Role-based filtering
+    if current_user["role"] == "student":
+        filter_query["student_id"] = current_user["id"]
+    elif current_user["role"] == "coach_admin" and current_user.get("branch_id"):
+        filter_query["branch_id"] = current_user["branch_id"]
+    
+    enrollments = await db.enrollments.find(filter_query).skip(skip).limit(limit).to_list(length=limit)
+    return {"enrollments": enrollments}
+
+@api_router.get("/students/{student_id}/courses")
+async def get_student_courses(
+    student_id: str,
+    current_user: dict = Depends(get_current_active_user)
+):
+    """Get student's enrolled courses"""
+    # Check permission
+    if current_user["role"] == "student" and current_user["id"] != student_id:
+        raise HTTPException(status_code=403, detail="Access denied")
+    
+    enrollments = await db.enrollments.find({"student_id": student_id, "is_active": True}).to_list(length=100)
+    
+    # Enrich with course details
+    course_ids = [e["course_id"] for e in enrollments]
+    courses = await db.courses.find({"id": {"$in": course_ids}}).to_list(length=100)
+    
+    course_dict = {c["id"]: c for c in courses}
+    
+    result = []
+    for enrollment in enrollments:
+        course = course_dict.get(enrollment["course_id"])
+        if course:
+            result.append({
+                "enrollment": enrollment,
+                "course": course
+            })
+    
+    return {"enrolled_courses": result}
+
+# ATTENDANCE SYSTEM ENDPOINTS
+@api_router.post("/attendance/generate-qr")
+async def generate_attendance_qr(
+    course_id: str,
+    branch_id: str,
+    valid_minutes: int = 30,
+    current_user: dict = Depends(require_role([UserRole.SUPER_ADMIN, UserRole.COACH_ADMIN, UserRole.COACH]))
+):
+    """Generate QR code for attendance"""
+    # Validate course and branch
+    course = await db.courses.find_one({"id": course_id})
+    branch = await db.branches.find_one({"id": branch_id})
+    
+    if not course or not branch:
+        raise HTTPException(status_code=404, detail="Course or branch not found")
+    
+    # Generate unique QR data
+    qr_data = f"attendance:{course_id}:{branch_id}:{int(datetime.utcnow().timestamp())}"
+    qr_code_image = generate_qr_code(qr_data)
+    
+    # Store QR session
+    qr_session = QRCodeSession(
+        branch_id=branch_id,
+        course_id=course_id,
+        qr_code=qr_data,
+        qr_code_data=qr_code_image,
+        generated_by=current_user["id"],
+        valid_until=datetime.utcnow() + timedelta(minutes=valid_minutes)
+    )
+    
+    await db.qr_sessions.insert_one(qr_session.dict())
+    
+    return {
+        "qr_code_id": qr_session.id,
+        "qr_code_data": qr_code_image,
+        "valid_until": qr_session.valid_until,
+        "course_name": course["name"]
+    }
+
+@api_router.post("/attendance/scan-qr")
+async def scan_qr_attendance(
+    qr_code: str,
+    current_user: dict = Depends(get_current_active_user)
+):
+    """Mark attendance via QR code scan"""
+    if current_user["role"] != "student":
+        raise HTTPException(status_code=403, detail="Only students can scan QR codes")
+    
+    # Find valid QR session
+    qr_session = await db.qr_sessions.find_one({
+        "qr_code": qr_code,
+        "is_active": True,
+        "valid_until": {"$gt": datetime.utcnow()}
+    })
+    
+    if not qr_session:
+        raise HTTPException(status_code=400, detail="Invalid or expired QR code")
+    
+    # Check if student is enrolled in this course
+    enrollment = await db.enrollments.find_one({
+        "student_id": current_user["id"],
+        "course_id": qr_session["course_id"],
+        "branch_id": qr_session["branch_id"],
+        "is_active": True
+    })
+    
+    if not enrollment:
+        raise HTTPException(status_code=400, detail="You are not enrolled in this course")
+    
+    # Check if already marked attendance today
+    today = datetime.utcnow().date()
+    existing_attendance = await db.attendance.find_one({
+        "student_id": current_user["id"],
+        "course_id": qr_session["course_id"],
+        "attendance_date": {
+            "$gte": datetime.combine(today, datetime.min.time()),
+            "$lt": datetime.combine(today + timedelta(days=1), datetime.min.time())
+        }
+    })
+    
+    if existing_attendance:
+        raise HTTPException(status_code=400, detail="Attendance already marked for today")
+    
+    # Create attendance record
+    attendance = Attendance(
+        student_id=current_user["id"],
+        course_id=qr_session["course_id"],
+        branch_id=qr_session["branch_id"],
+        attendance_date=datetime.utcnow(),
+        check_in_time=datetime.utcnow(),
+        method=AttendanceMethod.QR_CODE,
+        qr_code_used=qr_code
+    )
+    
+    await db.attendance.insert_one(attendance.dict())
+    
+    return {"message": "Attendance marked successfully", "attendance_id": attendance.id}
+
+@api_router.post("/attendance/manual")
+async def manual_attendance(
+    attendance_data: AttendanceCreate,
+    current_user: dict = Depends(require_role([UserRole.SUPER_ADMIN, UserRole.COACH_ADMIN, UserRole.COACH]))
+):
+    """Manually mark attendance"""
+    attendance = Attendance(
+        **attendance_data.dict(),
+        check_in_time=datetime.utcnow(),
+        marked_by=current_user["id"]
+    )
+    
+    await db.attendance.insert_one(attendance.dict())
+    return {"message": "Attendance marked successfully", "attendance_id": attendance.id}
+
+@api_router.get("/attendance/reports")
+async def get_attendance_reports(
+    student_id: Optional[str] = None,
+    course_id: Optional[str] = None,
+    branch_id: Optional[str] = None,
+    start_date: Optional[datetime] = None,
+    end_date: Optional[datetime] = None,
+    current_user: dict = Depends(get_current_active_user)
+):
+    """Get attendance reports"""
+    filter_query = {}
+    
+    if student_id:
+        filter_query["student_id"] = student_id
+    if course_id:
+        filter_query["course_id"] = course_id
+    if branch_id:
+        filter_query["branch_id"] = branch_id
+    
+    if start_date and end_date:
+        filter_query["attendance_date"] = {"$gte": start_date, "$lte": end_date}
+    
+    # Role-based filtering
+    if current_user["role"] == "student":
+        filter_query["student_id"] = current_user["id"]
+    elif current_user["role"] == "coach_admin" and current_user.get("branch_id"):
+        filter_query["branch_id"] = current_user["branch_id"]
+    
+    attendance_records = await db.attendance.find(filter_query).to_list(length=1000)
+    return {"attendance_records": attendance_records}
+
+# PAYMENT MANAGEMENT ENDPOINTS
+@api_router.post("/payments")
+async def process_payment(
+    payment_data: PaymentCreate,
+    current_user: dict = Depends(require_role([UserRole.SUPER_ADMIN, UserRole.COACH_ADMIN]))
+):
+    """Process payment"""
+    payment = Payment(
+        **payment_data.dict(),
+        payment_status=PaymentStatus.PAID if payment_data.transaction_id else PaymentStatus.PENDING,
+        payment_date=datetime.utcnow() if payment_data.transaction_id else None
+    )
+    
+    await db.payments.insert_one(payment.dict())
+    
+    # Update enrollment payment status if needed
+    if payment.payment_status == PaymentStatus.PAID:
+        enrollment = await db.enrollments.find_one({"id": payment.enrollment_id})
+        if enrollment:
+            # Calculate next due date
+            next_due = datetime.utcnow() + timedelta(days=30)
+            await db.enrollments.update_one(
+                {"id": payment.enrollment_id},
+                {"$set": {"payment_status": PaymentStatus.PAID, "next_due_date": next_due}}
+            )
+    
+    # Send payment confirmation
+    student = await db.users.find_one({"id": payment.student_id})
+    if student:
+        message = f"Payment received: ₹{payment.amount} for {payment.payment_type}. Thank you!"
+        await send_whatsapp(student["phone"], message)
+    
+    return {"message": "Payment processed successfully", "payment_id": payment.id}
+
+@api_router.get("/payments")
+async def get_payments(
+    student_id: Optional[str] = None,
+    enrollment_id: Optional[str] = None,
+    payment_status: Optional[PaymentStatus] = None,
+    skip: int = 0,
+    limit: int = 50,
+    current_user: dict = Depends(get_current_active_user)
+):
+    """Get payments with filtering"""
+    filter_query = {}
+    
+    if student_id:
+        filter_query["student_id"] = student_id
+    if enrollment_id:
+        filter_query["enrollment_id"] = enrollment_id
+    if payment_status:
+        filter_query["payment_status"] = payment_status.value
+    
+    # Role-based filtering
+    if current_user["role"] == "student":
+        filter_query["student_id"] = current_user["id"]
+    
+    payments = await db.payments.find(filter_query).skip(skip).limit(limit).to_list(length=limit)
+    return {"payments": payments}
+
+@api_router.get("/payments/dues")
+async def get_outstanding_dues(
+    branch_id: Optional[str] = None,
+    current_user: dict = Depends(get_current_active_user)
+):
+    """Get outstanding dues"""
+    filter_query = {"payment_status": PaymentStatus.PENDING.value, "due_date": {"$lt": datetime.utcnow()}}
+    
+    if current_user["role"] == "student":
+        filter_query["student_id"] = current_user["id"]
+    
+    overdue_payments = await db.payments.find(filter_query).to_list(length=1000)
+    
+    # Group by student
+    dues_by_student = {}
+    for payment in overdue_payments:
+        student_id = payment["student_id"]
+        if student_id not in dues_by_student:
+            dues_by_student[student_id] = {"total_amount": 0, "payments": []}
+        dues_by_student[student_id]["total_amount"] += payment["amount"]
+        dues_by_student[student_id]["payments"].append(payment)
+    
+    return {"outstanding_dues": dues_by_student}
+
+# PRODUCTS/ACCESSORIES MANAGEMENT
+@api_router.post("/products")
+async def create_product(
+    product_data: ProductCreate,
+    current_user: dict = Depends(require_role([UserRole.SUPER_ADMIN]))
+):
+    """Create product"""
+    product = Product(**product_data.dict())
+    await db.products.insert_one(product.dict())
+    return {"message": "Product created successfully", "product_id": product.id}
+
+@api_router.get("/products")
+async def get_products(
+    branch_id: Optional[str] = None,
+    category: Optional[str] = None,
+    current_user: dict = Depends(get_current_active_user)
+):
+    """Get products catalog"""
+    filter_query = {"is_active": True}
+    
+    if category:
+        filter_query["category"] = category
+    
+    products = await db.products.find(filter_query).to_list(length=1000)
+    
+    # Filter by branch availability if specified
+    if branch_id:
+        products = [p for p in products if branch_id in p.get("branch_availability", {})]
+    
+    return {"products": products}
+
+@api_router.post("/products/purchase")
+async def purchase_product(
+    purchase_data: ProductPurchaseCreate,
+    current_user: dict = Depends(get_current_active_user)
+):
+    """Record offline product purchase"""
+    # Validate product and stock
+    product = await db.products.find_one({"id": purchase_data.product_id})
+    if not product:
+        raise HTTPException(status_code=404, detail="Product not found")
+    
+    branch_stock = product.get("branch_availability", {}).get(purchase_data.branch_id, 0)
+    if branch_stock < purchase_data.quantity:
+        raise HTTPException(status_code=400, detail="Insufficient stock")
+    
+    # Create purchase record
+    purchase = ProductPurchase(
+        **purchase_data.dict(),
+        unit_price=product["price"],
+        total_amount=product["price"] * purchase_data.quantity
+    )
+    
+    await db.product_purchases.insert_one(purchase.dict())
+    
+    # Update stock
+    new_stock = branch_stock - purchase_data.quantity
+    await db.products.update_one(
+        {"id": purchase_data.product_id},
+        {"$set": {f"branch_availability.{purchase_data.branch_id}": new_stock}}
+    )
+    
+    return {"message": "Purchase recorded successfully", "purchase_id": purchase.id, "total_amount": purchase.total_amount}
+
+# COMPLAINTS & FEEDBACK SYSTEM
+@api_router.post("/complaints")
+async def create_complaint(
+    complaint_data: ComplaintCreate,
+    current_user: dict = Depends(require_role([UserRole.STUDENT]))
+):
+    """Submit complaint (Students only)"""
+    complaint = Complaint(
+        **complaint_data.dict(),
+        student_id=current_user["id"],
+        branch_id=current_user.get("branch_id", "")
+    )
+    
+    await db.complaints.insert_one(complaint.dict())
+    
+    # Notify admins
+    admins = await db.users.find({"role": {"$in": ["super_admin", "coach_admin"]}}).to_list(length=100)
+    for admin in admins:
+        message = f"New complaint from {current_user['full_name']}: {complaint.subject}"
+        await send_whatsapp(admin["phone"], message)
+    
+    return {"message": "Complaint submitted successfully", "complaint_id": complaint.id}
+
+@api_router.get("/complaints")
+async def get_complaints(
+    status: Optional[ComplaintStatus] = None,
+    category: Optional[str] = None,
+    current_user: dict = Depends(get_current_active_user)
+):
+    """Get complaints"""
+    filter_query = {}
+    
+    if status:
+        filter_query["status"] = status.value
+    if category:
+        filter_query["category"] = category
+    
+    # Role-based filtering
+    if current_user["role"] == "student":
+        filter_query["student_id"] = current_user["id"]
+    
+    complaints = await db.complaints.find(filter_query).to_list(length=1000)
+    return {"complaints": complaints}
+
+@api_router.put("/complaints/{complaint_id}")
+async def update_complaint(
+    complaint_id: str,
+    complaint_update: ComplaintUpdate,
+    current_user: dict = Depends(require_role([UserRole.SUPER_ADMIN, UserRole.COACH_ADMIN]))
+):
+    """Update complaint status"""
+    update_data = {k: v for k, v in complaint_update.dict().items() if v is not None}
+    update_data["updated_at"] = datetime.utcnow()
+    
+    result = await db.complaints.update_one(
+        {"id": complaint_id},
+        {"$set": update_data}
+    )
+    
+    if result.matched_count == 0:
+        raise HTTPException(status_code=404, detail="Complaint not found")
+    
+    return {"message": "Complaint updated successfully"}
+
+@api_router.post("/feedback/coaches")
+async def rate_coach(
+    rating_data: CoachRatingCreate,
+    current_user: dict = Depends(require_role([UserRole.STUDENT]))
+):
+    """Rate and review coach"""
+    if rating_data.rating < 1 or rating_data.rating > 5:
+        raise HTTPException(status_code=400, detail="Rating must be between 1 and 5")
+    
+    rating = CoachRating(
+        **rating_data.dict(),
+        student_id=current_user["id"],
+        branch_id=current_user.get("branch_id", "")
+    )
+    
+    await db.coach_ratings.insert_one(rating.dict())
+    return {"message": "Rating submitted successfully", "rating_id": rating.id}
+
+# SESSION BOOKING SYSTEM
+@api_router.post("/sessions/book")
+async def book_session(
+    booking_data: SessionBookingCreate,
+    current_user: dict = Depends(require_role([UserRole.STUDENT]))
+):
+    """Book individual session"""
+    # Validate coach availability (simplified)
+    existing_booking = await db.session_bookings.find_one({
+        "coach_id": booking_data.coach_id,
+        "session_date": booking_data.session_date,
+        "status": {"$ne": SessionStatus.CANCELLED.value}
+    })
+    
+    if existing_booking:
+        raise HTTPException(status_code=400, detail="Coach not available at this time")
+    
+    booking = SessionBooking(
+        **booking_data.dict(),
+        student_id=current_user["id"]
+    )
+    
+    await db.session_bookings.insert_one(booking.dict())
+    
+    # Create payment record
+    payment = Payment(
+        student_id=current_user["id"],
+        enrollment_id="",  # No enrollment for individual sessions
+        amount=booking.fee,
+        payment_type="session_fee",
+        payment_method="pending",
+        payment_status=PaymentStatus.PENDING,
+        due_date=booking.session_date
+    )
+    await db.payments.insert_one(payment.dict())
+    
+    return {"message": "Session booked successfully", "booking_id": booking.id, "fee": booking.fee}
+
+@api_router.get("/sessions/my-bookings")
+async def get_my_bookings(
+    current_user: dict = Depends(require_role([UserRole.STUDENT]))
+):
+    """Get student's session bookings"""
+    bookings = await db.session_bookings.find({"student_id": current_user["id"]}).to_list(length=1000)
+    return {"bookings": bookings}
+
+# REPORTING & ANALYTICS ENDPOINTS
+@api_router.get("/reports/dashboard")
+async def get_dashboard_stats(
+    branch_id: Optional[str] = None,
+    current_user: dict = Depends(get_current_active_user)
+):
+    """Get dashboard statistics"""
+    stats = {}
+    
+    # Filter by role and branch
+    filter_query = {}
+    if current_user["role"] == "coach_admin" and current_user.get("branch_id"):
+        filter_query["branch_id"] = current_user["branch_id"]
+    elif branch_id:
+        filter_query["branch_id"] = branch_id
+    
+    # Total students
+    student_count = await db.users.count_documents({"role": "student", "is_active": True})
+    stats["total_students"] = student_count
+    
+    # Active enrollments
+    enrollment_count = await db.enrollments.count_documents({**filter_query, "is_active": True})
+    stats["active_enrollments"] = enrollment_count
+    
+    # Pending payments
+    pending_payments = await db.payments.count_documents({"payment_status": PaymentStatus.PENDING.value})
+    stats["pending_payments"] = pending_payments
+    
+    # Overdue payments
+    overdue_count = await db.payments.count_documents({
+        "payment_status": PaymentStatus.PENDING.value,
+        "due_date": {"$lt": datetime.utcnow()}
+    })
+    stats["overdue_payments"] = overdue_count
+    
+    # Today's attendance
+    today = datetime.utcnow().date()
+    today_attendance = await db.attendance.count_documents({
+        "attendance_date": {
+            "$gte": datetime.combine(today, datetime.min.time()),
+            "$lt": datetime.combine(today + timedelta(days=1), datetime.min.time())
+        }
+    })
+    stats["today_attendance"] = today_attendance
+    
+    return {"dashboard_stats": stats}
+
+# Add middleware and startup
+app.add_middleware(
+    CORSMiddleware,
+    allow_credentials=True,
+    allow_origins=os.environ.get('CORS_ORIGINS', '*').split(','),
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
+logger = logging.getLogger(__name__)
+
+# Include API routes
+app.include_router(api_router)
+
+# Health check endpoint
+@app.get("/")
+async def health_check():
+    return {"status": "OK", "message": "Student Management System API", "version": "1.0.0"}
+
+@app.on_event("shutdown")
+async def shutdown_db_client():
+    client.close()
