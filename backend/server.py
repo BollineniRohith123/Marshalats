@@ -623,7 +623,7 @@ async def get_branches(
 ):
     """Get all branches"""
     branches = await db.branches.find({"is_active": True}).skip(skip).limit(limit).to_list(length=limit)
-    return {"branches": branches}
+    return {"branches": serialize_doc(branches)}
 
 @api_router.get("/branches/{branch_id}")
 async def get_branch(
