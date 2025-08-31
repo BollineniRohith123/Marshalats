@@ -28,7 +28,7 @@ Authorization: Bearer <your_jwt_token>
 ## 1. Authentication & User Management
 
 ### POST /api/auth/register
-**Description**: Register a new student (public endpoint)
+**Description**: Register a new student (public endpoint). Upon successful registration, an SMS containing login credentials will be sent to the registered phone number.
 **Access**: Public
 **Request Body**:
 ```json
@@ -105,7 +105,7 @@ Authorization: Bearer <your_jwt_token>
 ```
 
 ### POST /api/auth/forgot-password
-**Description**: Initiate password reset
+**Description**: Initiate password reset. If an account with the provided email exists, a password reset token will be sent via SMS.
 **Access**: Public
 **Request Body**:
 ```json
@@ -142,7 +142,7 @@ Authorization: Bearer <your_jwt_token>
 ## 2. User Management
 
 ### POST /api/users
-**Description**: Create new user
+**Description**: Create new user. Coach Admins can only create users for their own branch and cannot create other admin users (Super Admin or Coach Admin roles).
 **Access**: Super Admin, Coach Admin
 **Request Body**:
 ```json
@@ -152,6 +152,13 @@ Authorization: Bearer <your_jwt_token>
   "full_name": "New User",
   "role": "coach_admin",
   "branch_id": "branch-uuid"
+}
+```
+**Response**:
+```json
+{
+  "message": "User created successfully",
+  "user_id": "user-uuid"
 }
 ```
 
@@ -183,13 +190,35 @@ Authorization: Bearer <your_jwt_token>
 ### PUT /api/users/{user_id}
 **Description**: Update user. Coach Admins can only update students in their own branch.
 **Access**: Super Admin, Coach Admin
+**Request Body**:
+```json
+{
+  "email": "newemail@example.com",
+  "phone": "+0987654321",
+  "full_name": "Jane Doe",
+  "biometric_id": "fingerprint_456",
+  "is_active": true
+}
+```
+**Response**:
+```json
+{
+  "message": "User updated successfully"
+}
+```
 
 ### DELETE /api/users/{user_id}
 **Description**: Deactivate user
 **Access**: Super Admin
+**Response**:
+```json
+{
+  "message": "User deactivated successfully"
+}
+```
 
 ### POST /api/users/{user_id}/force-password-reset
-**Description**: Force a password reset for a user. A new temporary password will be generated and sent to the user.
+**Description**: Force a password reset for a user. A new temporary password will be generated and sent to the user via SMS and WhatsApp.
 **Access**: Super Admin, Coach Admin
 **Details**:
 - Super Admins can reset the password for any user.
@@ -225,19 +254,83 @@ Authorization: Bearer <your_jwt_token>
   }
 }
 ```
+**Response**:
+```json
+{
+  "message": "Branch created successfully",
+  "branch_id": "branch-uuid"
+}
+```
 
 ### GET /api/branches
 **Description**: Get all branches
 **Access**: All authenticated users
+**Query Parameters**:
+- `skip`: Skip records (pagination)
+- `limit`: Limit records (default: 50)
+**Response**:
+```json
+{
+  "branches": [
+    {
+      "id": "branch-uuid",
+      "name": "Downtown Branch",
+      "address": "123 Main St",
+      "city": "Springfield",
+      "state": "IL",
+      "pincode": "62701",
+      "phone": "+1234567890",
+      "email": "downtown@example.com",
+      "manager_id": "manager-uuid",
+      "is_active": true,
+      "business_hours": {},
+      "created_at": "2025-01-07T12:00:00Z",
+      "updated_at": "2025-01-07T12:00:00Z"
+    }
+  ]
+}
+```
 
 ### GET /api/branches/{branch_id}
 **Description**: Get branch by ID
 **Access**: All authenticated users
+**Response**:
+```json
+{
+  "id": "branch-uuid",
+  "name": "Downtown Branch",
+  "address": "123 Main St",
+  "city": "Springfield",
+  "state": "IL",
+  "pincode": "62701",
+  "phone": "+1234567890",
+  "email": "downtown@example.com",
+  "manager_id": "manager-uuid",
+  "is_active": true,
+  "business_hours": {},
+  "created_at": "2025-01-07T12:00:00Z",
+  "updated_at": "2025-01-07T12:00:00Z"
+}
+```
 
 ### PUT /api/branches/{branch_id}
 **Description**: Update branch.
 **Access**: Super Admin, Coach Admin (own branch only)
 **Details**: Coach Admins can only update certain fields (e.g., name, address, phone) and cannot update the manager or active status.
+**Request Body**:
+```json
+{
+  "name": "Updated Branch Name",
+  "address": "456 New St",
+  "phone": "+0987654321"
+}
+```
+**Response**:
+```json
+{
+  "message": "Branch updated successfully"
+}
+```
 
 ### POST /api/branches/{branch_id}/holidays
 **Description**: Create a new holiday for a branch.
@@ -249,14 +342,39 @@ Authorization: Bearer <your_jwt_token>
   "description": "Christmas Day"
 }
 ```
+**Response**:
+```json
+{
+  "id": "holiday-uuid",
+  "branch_id": "branch-uuid",
+  "date": "2025-12-25",
+  "description": "Christmas Day",
+  "created_at": "2025-01-07T12:00:00Z"
+}
+```
 
 ### GET /api/branches/{branch_id}/holidays
 **Description**: Get all holidays for a specific branch.
 **Access**: All authenticated users
+**Response**:
+```json
+{
+  "holidays": [
+    {
+      "id": "holiday-uuid",
+      "branch_id": "branch-uuid",
+      "date": "2025-12-25",
+      "description": "Christmas Day",
+      "created_at": "2025-01-07T12:00:00Z"
+    }
+  ]
+}
+```
 
 ### DELETE /api/branches/{branch_id}/holidays/{holiday_id}
 **Description**: Delete a holiday for a branch.
 **Access**: Super Admin, Coach Admin (own branch only)
+**Response**: (No content) `204 No Content`
 
 ---
 
@@ -285,25 +403,94 @@ Authorization: Bearer <your_jwt_token>
   }
 }
 ```
+**Response**:
+```json
+{
+  "message": "Course created successfully",
+  "course_id": "course-uuid"
+}
+```
 
 ### GET /api/courses
 **Description**: Get courses
 **Access**: All authenticated users
 **Query Parameters**:
-- `branch_id`: Filter by branch
+- `branch_id`: Filter by branch (only courses available at this branch)
 - `category`: Filter by course category (e.g., `Martial Arts`)
 - `level`: Filter by course level (e.g., `Beginner`)
+- `skip`: Skip records (pagination)
+- `limit`: Limit records (default: 50)
+**Response**:
+```json
+{
+  "courses": [
+    {
+      "id": "course-uuid",
+      "name": "Martial Arts Basics",
+      "description": "Introduction to martial arts",
+      "category": "Martial Arts",
+      "level": "Beginner",
+      "duration_months": 6,
+      "base_fee": 1000.0,
+      "branch_pricing": {},
+      "coach_id": "coach-uuid",
+      "schedule": {},
+      "is_active": true,
+      "created_at": "2025-01-07T12:00:00Z",
+      "updated_at": "2025-01-07T12:00:00Z"
+    }
+  ]
+}
+```
 
 ### PUT /api/courses/{course_id}
 **Description**: Update course
 **Access**: Super Admin, Coach Admin
+**Request Body**:
+```json
+{
+  "name": "Advanced Martial Arts",
+  "base_fee": 1500.0
+}
+```
+**Response**:
+```json
+{
+  "message": "Course updated successfully"
+}
+```
+
+### GET /api/courses/{course_id}/stats
+**Description**: Get statistics for a specific course.
+**Access**: Super Admin, Coach Admin
+**Response**:
+```json
+{
+  "course_details": {
+    "id": "course-uuid",
+    "name": "Martial Arts Basics",
+    "description": "Introduction to martial arts",
+    "category": "Martial Arts",
+    "level": "Beginner",
+    "duration_months": 6,
+    "base_fee": 1000.0,
+    "branch_pricing": {},
+    "coach_id": "coach-uuid",
+    "schedule": {},
+    "is_active": true,
+    "created_at": "2025-01-07T12:00:00Z",
+    "updated_at": "2025-01-07T12:00:00Z"
+  },
+  "active_enrollments": 120
+}
+```
 
 ---
 
 ## 5. Student Enrollment & Management
 
 ### POST /api/enrollments
-**Description**: Create student enrollment
+**Description**: Create student enrollment. This will also create initial pending payment records (admission fee and course fee) and send a WhatsApp confirmation to the student.
 **Access**: Super Admin, Coach Admin
 **Request Body**:
 ```json
@@ -316,21 +503,91 @@ Authorization: Bearer <your_jwt_token>
   "admission_fee": 500.0
 }
 ```
+**Response**:
+```json
+{
+  "message": "Enrollment created successfully",
+  "enrollment_id": "enrollment-uuid"
+}
+```
 
 ### GET /api/enrollments
 **Description**: Get enrollments with filtering
-**Access**: Based on role
+**Access**: Based on role (Super Admin, Coach Admin can see all/their branch's enrollments; Student can only see their own)
 **Query Parameters**:
 - `student_id`: Filter by student
 - `course_id`: Filter by course
 - `branch_id`: Filter by branch
+- `skip`: Skip records (pagination)
+- `limit`: Limit records (default: 50)
+**Response**:
+```json
+{
+  "enrollments": [
+    {
+      "id": "enrollment-uuid",
+      "student_id": "student-uuid",
+      "course_id": "course-uuid",
+      "branch_id": "branch-uuid",
+      "enrollment_date": "2025-01-07T12:00:00Z",
+      "start_date": "2025-02-01T00:00:00Z",
+      "end_date": "2025-08-01T00:00:00Z",
+      "fee_amount": 1200.0,
+      "admission_fee": 500.0,
+      "payment_status": "pending",
+      "next_due_date": "2025-03-01T00:00:00Z",
+      "is_active": true,
+      "created_at": "2025-01-07T12:00:00Z"
+    }
+  ]
+}
+```
 
 ### GET /api/students/{student_id}/courses
 **Description**: Get student's enrolled courses
 **Access**: Student (own data), Admins
+**Response**:
+```json
+{
+  "enrolled_courses": [
+    {
+      "enrollment": {
+        "id": "enrollment-uuid",
+        "student_id": "student-uuid",
+        "course_id": "course-uuid",
+        "branch_id": "branch-uuid",
+        "enrollment_date": "2025-01-07T12:00:00Z",
+        "start_date": "2025-02-01T00:00:00Z",
+        "end_date": "2025-08-01T00:00:00Z",
+        "fee_amount": 1200.0,
+        "admission_fee": 500.0,
+        "payment_status": "pending",
+        "next_due_date": "2025-03-01T00:00:00Z",
+        "is_active": true,
+        "created_at": "2025-01-07T12:00:00Z"
+      },
+      "course": {
+        "id": "course-uuid",
+        "name": "Martial Arts Basics",
+        "description": "Introduction to martial arts",
+        "category": "Martial Arts",
+        "level": "Beginner",
+        "duration_months": 6,
+        "base_fee": 1000.0,
+        "branch_pricing": {},
+        "coach_id": "coach-uuid",
+        "schedule": {},
+        "is_active": true,
+        "created_at": "2025-01-07T12:00:00Z",
+        "updated_at": "2025-01-07T12:00:00Z"
+      }
+    }
+  ]
+}
+```
 
 ### POST /api/students/enroll
-**Description**: Allow a student to enroll themselves in a course.
+**Description**: Allow a student to enroll themselves in a course. This will also create initial pending payment records (admission fee and course fee) and send a WhatsApp confirmation to the student.
 **Access**: Student
 **Request Body**:
 ```json
@@ -382,6 +639,13 @@ Authorization: Bearer <your_jwt_token>
   "qr_code": "attendance:course-id:branch-id:timestamp"
 }
 ```
+**Response**:
+```json
+{
+  "message": "Attendance marked successfully",
+  "attendance_id": "attendance-uuid"
+}
+```
 
 ### POST /api/attendance/biometric
 **Description**: Record attendance from a (mock) biometric device. This endpoint would typically be called by the hardware.
@@ -416,16 +680,45 @@ Authorization: Bearer <your_jwt_token>
   "notes": "Late arrival"
 }
 ```
+**Response**:
+```json
+{
+  "message": "Attendance marked successfully",
+  "attendance_id": "attendance-uuid"
+}
+```
 
 ### GET /api/attendance/reports
 **Description**: Get attendance reports
-**Access**: Based on role
+**Access**: Based on role (Super Admin, Coach Admin, Coach can see all/their branch's reports; Student can only see their own)
 **Query Parameters**:
 - `student_id`: Filter by student
 - `course_id`: Filter by course
 - `branch_id`: Filter by branch
 - `start_date`: Filter by date range
 - `end_date`: Filter by date range
+**Response**:
+```json
+{
+  "attendance_records": [
+    {
+      "id": "attendance-uuid",
+      "student_id": "student-uuid",
+      "course_id": "course-uuid",
+      "branch_id": "branch-uuid",
+      "attendance_date": "2025-01-07T10:00:00Z",
+      "check_in_time": "2025-01-07T10:00:00Z",
+      "check_out_time": null,
+      "method": "manual",
+      "qr_code_used": null,
+      "marked_by": "user-uuid",
+      "is_present": true,
+      "notes": "Late arrival",
+      "created_at": "2025-01-07T10:00:00Z"
+    }
+  ]
+}
+```
 
 ### GET /api/attendance/reports/export
 **Description**: Export attendance reports as a CSV file. Accepts the same filters as the Get Attendance Reports endpoint.
@@ -444,7 +737,7 @@ A downloadable CSV file with the attendance records.
 ## 7. Payment & Subscription Management
 
 ### POST /api/payments
-**Description**: Process payment
+**Description**: Process payment. This will update enrollment payment status if the payment clears it and send a WhatsApp confirmation to the student.
 **Access**: Super Admin, Coach Admin
 **Request Body**:
 ```json
@@ -459,21 +752,111 @@ A downloadable CSV file with the attendance records.
   "notes": "Monthly fee payment"
 }
 ```
+**Response**:
+```json
+{
+  "message": "Payment processed successfully",
+  "payment_id": "payment-uuid"
+}
+```
+
+### PUT /api/payments/{payment_id}
+**Description**: Update a payment's status.
+**Access**: Super Admin, Coach Admin
+**Request Body**:
+```json
+{
+  "payment_status": "paid"
+}
+```
+**Response**:
+```json
+{
+  "message": "Payment updated successfully"
+}
+```
+
+### POST /api/payments/{payment_id}/proof
+**Description**: Submit proof of payment for an offline transaction.
+**Access**: Student
+**Request Body**:
+```json
+{
+  "proof": "url_to_image_of_receipt"
+}
+```
+**Response**:
+```json
+{
+  "message": "Payment proof submitted successfully."
+}
+```
 
 ### GET /api/payments
 **Description**: Get payments with filtering
-**Access**: Based on role
+**Access**: Based on role (Super Admin, Coach Admin can see all/their branch's payments; Student can only see their own)
 **Query Parameters**:
 - `student_id`: Filter by student
 - `enrollment_id`: Filter by enrollment
 - `payment_status`: Filter by status (pending, paid, overdue, cancelled)
+- `skip`: Skip records (pagination)
+- `limit`: Limit records (default: 50)
+**Response**:
+```json
+{
+  "payments": [
+    {
+      "id": "payment-uuid",
+      "student_id": "student-uuid",
+      "enrollment_id": "enrollment-uuid",
+      "amount": 1200.0,
+      "payment_type": "course_fee",
+      "payment_method": "cash",
+      "payment_status": "pending",
+      "transaction_id": null,
+      "payment_date": null,
+      "due_date": "2025-02-01T00:00:00Z",
+      "notes": "Monthly fee payment",
+      "payment_proof": null,
+      "created_at": "2025-01-07T12:00:00Z"
+    }
+  ]
+}
+```
 
 ### GET /api/payments/dues
 **Description**: Get outstanding dues
-**Access**: Based on role
+**Access**: Based on role (Super Admin, Coach Admin can see all/their branch's dues; Student can only see their own)
+**Response**:
+```json
+{
+  "outstanding_dues": {
+    "student-uuid": {
+      "total_amount": 1200.0,
+      "payments": [
+        {
+          "id": "payment-uuid",
+          "student_id": "student-uuid",
+          "enrollment_id": "enrollment-uuid",
+          "amount": 1200.0,
+          "payment_type": "course_fee",
+          "payment_method": "cash",
+          "payment_status": "pending",
+          "transaction_id": null,
+          "payment_date": null,
+          "due_date": "2025-02-01T00:00:00Z",
+          "notes": "Monthly fee payment",
+          "payment_proof": null,
+          "created_at": "2025-01-07T12:00:00Z"
+        }
+      ]
+    }
+  }
+}
+```
 
 ### POST /api/payments/send-reminders
-**Description**: Triggers sending of payment reminders for all pending and overdue payments.
+**Description**: Triggers sending of payment reminders for all pending and overdue payments via SMS and WhatsApp.
 **Access**: Super Admin, Coach Admin
 **Response**:
 ```json
@@ -483,7 +866,7 @@ A downloadable CSV file with the attendance records.
 ```
 
 ### POST /api/students/payments
-**Description**: Allow a student to process a payment for their enrollment.
+**Description**: Allow a student to process a payment for their enrollment. This will send a WhatsApp confirmation to the student.
 **Access**: Student
 **Request Body**:
 ```json
@@ -524,6 +907,13 @@ A downloadable CSV file with the attendance records.
   "image_url": "https://example.com/gloves.jpg"
 }
 ```
+**Response**:
+```json
+{
+  "message": "Product created successfully",
+  "product_id": "product-uuid"
+}
+```
 
 ### GET /api/products
 **Description**: Get products catalog
@@ -531,6 +921,28 @@ A downloadable CSV file with the attendance records.
 **Query Parameters**:
 - `branch_id`: Filter by branch availability
 - `category`: Filter by category
+**Response**:
+```json
+{
+  "products": [
+    {
+      "id": "product-uuid",
+      "name": "Training Gloves",
+      "description": "Professional training gloves",
+      "category": "gloves",
+      "price": 250.0,
+      "branch_availability": {
+        "branch-uuid-1": 50
+      },
+      "stock_alert_threshold": 10,
+      "image_url": "https://example.com/gloves.jpg",
+      "is_active": true,
+      "created_at": "2025-01-07T12:00:00Z",
+      "updated_at": "2025-01-07T12:00:00Z"
+    }
+  ]
+}
+```
 
 ### PUT /api/products/{product_id}
 **Description**: Update product details.
@@ -540,6 +952,12 @@ A downloadable CSV file with the attendance records.
 {
   "name": "Updated Training Gloves",
   "price": 275.0
+}
+```
+**Response**:
+```json
+{
+  "message": "Product updated successfully"
 }
 ```
 
@@ -553,9 +971,43 @@ A downloadable CSV file with the attendance records.
   "quantity": 50
 }
 ```
+**Response**:
+```json
+{
+  "message": "Successfully added 50 units to product Training Gloves at branch branch-uuid-1."
+}
+```
+
+### GET /api/products/purchases
+**Description**: Get product purchases with filtering. Students can only view their own purchases.
+**Access**: All authenticated users
+**Query Parameters**:
+- `student_id`: Filter by student (Admin only)
+- `branch_id`: Filter by branch (Admin only)
+- `skip`: Skip records (pagination)
+- `limit`: Limit records (default: 50)
+**Response**:
+```json
+{
+  "purchases": [
+    {
+      "id": "purchase-uuid",
+      "student_id": "student-uuid",
+      "product_id": "product-uuid",
+      "branch_id": "branch-uuid",
+      "quantity": 2,
+      "unit_price": 250.0,
+      "total_amount": 500.0,
+      "payment_method": "cash",
+      "purchase_date": "2025-01-07T12:00:00Z",
+      "created_at": "2025-01-07T12:00:00Z"
+    }
+  ]
+}
+```
 
 ### POST /api/products/purchase
-**Description**: Record offline product purchase. **This may trigger a low-stock alert notification to admins.**
+**Description**: Record offline product purchase. This may trigger a low-stock alert notification to admins.
 **Access**: All authenticated users
 **Request Body**:
 ```json
@@ -567,16 +1019,17 @@ A downloadable CSV file with the attendance records.
   "payment_method": "cash"
 }
 ```
-
-### GET /api/products/purchases
-**Description**: Get product purchases with filtering. Students can only view their own purchases.
-**Access**: All authenticated users
-**Query Parameters**:
-- `student_id`: Filter by student (Admin only)
-- `branch_id`: Filter by branch (Admin only)
+**Response**:
+```json
+{
+  "message": "Purchase recorded successfully",
+  "purchase_id": "purchase-uuid",
+  "total_amount": 500.0
+}
+```
 
 ### POST /api/students/products/purchase
-**Description**: Allow a student to purchase a product online. **This may trigger a low-stock alert notification to admins.**
+**Description**: Allow a student to purchase a product online. This may trigger a low-stock alert notification to admins and will create a payment record. A WhatsApp confirmation will be sent to the student.
 **Access**: Student
 **Request Body**:
 ```json
@@ -600,7 +1053,7 @@ A downloadable CSV file with the attendance records.
 ## 9. Complaints & Feedback System
 
 ### POST /api/complaints
-**Description**: Submit complaint (Students only)
+**Description**: Submit complaint (Students only). This will notify relevant admins via WhatsApp.
 **Access**: Students
 **Request Body**:
 ```json
@@ -612,16 +1065,45 @@ A downloadable CSV file with the attendance records.
   "priority": "high"
 }
 ```
+**Response**:
+```json
+{
+  "message": "Complaint submitted successfully",
+  "complaint_id": "complaint-uuid"
+}
+```
 
 ### GET /api/complaints
 **Description**: Get complaints
-**Access**: Based on role
+**Access**: Based on role (Super Admin, Coach Admin can see all/their branch's complaints; Student can only see their own)
 **Query Parameters**:
 - `status`: Filter by status (open, in_progress, resolved, closed)
 - `category`: Filter by category
+**Response**:
+```json
+{
+  "complaints": [
+    {
+      "id": "complaint-uuid",
+      "student_id": "student-uuid",
+      "branch_id": "branch-uuid",
+      "subject": "Inappropriate behavior",
+      "description": "Detailed description of the issue",
+      "category": "coach_behavior",
+      "coach_id": "coach-uuid",
+      "status": "open",
+      "priority": "high",
+      "assigned_to": null,
+      "resolution": null,
+      "created_at": "2025-01-07T12:00:00Z",
+      "updated_at": "2025-01-07T12:00:00Z"
+    }
+  ]
+}
+```
 
 ### PUT /api/complaints/{complaint_id}
-**Description**: Update complaint status. **This will trigger a notification to the student who filed the complaint.**
+**Description**: Update complaint status. This will trigger a notification to the student who filed the complaint.
 **Access**: Super Admin, Coach Admin
 **Request Body**:
 ```json
@@ -629,6 +1111,12 @@ A downloadable CSV file with the attendance records.
   "status": "resolved",
   "assigned_to": "admin-uuid",
   "resolution": "Issue has been resolved through counseling"
+}
+```
+**Response**:
+```json
+{
+  "message": "Complaint updated successfully"
 }
 ```
 
@@ -643,13 +1131,40 @@ A downloadable CSV file with the attendance records.
   "review": "Great instructor, very patient"
 }
 ```
+**Response**:
+```json
+{
+  "message": "Rating submitted successfully",
+  "rating_id": "rating-uuid"
+}
+```
+
+### GET /api/coaches/{coach_id}/ratings
+**Description**: Get all ratings for a specific coach.
+**Access**: All authenticated users
+**Response**:
+```json
+{
+  "ratings": [
+    {
+      "id": "rating-uuid",
+      "student_id": "student-uuid",
+      "coach_id": "coach-uuid",
+      "branch_id": "branch-uuid",
+      "rating": 4,
+      "review": "Great instructor, very patient",
+      "created_at": "2025-01-07T12:00:00Z"
+    }
+  ]
+}
+```
 
 ---
 
 ## 10. Session Booking System
 
 ### POST /api/sessions/book
-**Description**: Book individual session (₹250 flat rate)
+**Description**: Book individual session (₹250 flat rate). This will also create a pending payment record for the session fee.
 **Access**: Students
 **Request Body**:
 ```json
@@ -662,10 +1177,39 @@ A downloadable CSV file with the attendance records.
   "notes": "Focus on basic techniques"
 }
 ```
+**Response**:
+```json
+{
+  "message": "Session booked successfully",
+  "booking_id": "booking-uuid",
+  "fee": 250.0
+}
+```
 
 ### GET /api/sessions/my-bookings
 **Description**: Get student's session bookings
 **Access**: Students
+**Response**:
+```json
+{
+  "bookings": [
+    {
+      "id": "booking-uuid",
+      "student_id": "student-uuid",
+      "course_id": "course-uuid",
+      "branch_id": "branch-uuid",
+      "coach_id": "coach-uuid",
+      "session_date": "2025-01-15T16:00:00Z",
+      "duration_minutes": 60,
+      "fee": 250.0,
+      "status": "scheduled",
+      "payment_status": "pending",
+      "notes": "Focus on basic techniques",
+      "created_at": "2025-01-07T12:00:00Z"
+    }
+  ]
+}
+```
 
 ---
 
@@ -683,20 +1227,66 @@ A downloadable CSV file with the attendance records.
   "reason": "Moving to a new city."
 }
 ```
+**Response**:
+```json
+{
+  "id": "transfer-request-uuid",
+  "student_id": "student-uuid",
+  "current_branch_id": "current-branch-uuid",
+  "new_branch_id": "new-branch-uuid",
+  "reason": "Moving to a new city.",
+  "status": "pending",
+  "created_at": "2025-01-07T12:00:00Z",
+  "updated_at": "2025-01-07T12:00:00Z"
+}
+```
 
 ### GET /api/requests/transfer
 **Description**: Get a list of transfer requests.
-**Access**: Super Admin, Coach Admin
+**Access**: Super Admin, Coach Admin (can only see requests for their own branch)
 **Query Parameters**:
 - `status`: Filter by status (pending, approved, rejected)
+**Response**:
+```json
+{
+  "requests": [
+    {
+      "id": "transfer-request-uuid",
+      "student_id": "student-uuid",
+      "current_branch_id": "current-branch-uuid",
+      "new_branch_id": "new-branch-uuid",
+      "reason": "Moving to a new city.",
+      "status": "pending",
+      "created_at": "2025-01-07T12:00:00Z",
+      "updated_at": "2025-01-07T12:00:00Z"
+    }
+  ]
+}
+```
 
 ### PUT /api/requests/transfer/{request_id}
-**Description**: Update a transfer request (approve/reject).
-**Access**: Super Admin, Coach Admin
+**Description**: Update a transfer request (approve/reject). On approval, the student's branch will be updated.
+**Access**: Super Admin, Coach Admin (can only manage requests for their own branch)
 **Request Body**:
 ```json
 {
   "status": "approved"
+}
+```
+**Response**:
+```json
+{
+  "message": "Transfer request updated successfully.",
+  "request": {
+    "id": "transfer-request-uuid",
+    "student_id": "student-uuid",
+    "current_branch_id": "current-branch-uuid",
+    "new_branch_id": "new-branch-uuid",
+    "reason": "Moving to a new city.",
+    "status": "approved",
+    "created_at": "2025-01-07T12:00:00Z",
+    "updated_at": "2025-01-07T12:00:00Z"
+  }
 }
 ```
 
@@ -713,20 +1303,69 @@ A downloadable CSV file with the attendance records.
   "reason": "I would like to switch to the advanced course."
 }
 ```
+**Response**:
+```json
+{
+  "id": "course-change-request-uuid",
+  "student_id": "student-uuid",
+  "branch_id": "branch-uuid",
+  "current_enrollment_id": "enrollment-uuid-old",
+  "new_course_id": "course-uuid-new",
+  "reason": "I would like to switch to the advanced course.",
+  "status": "pending",
+  "created_at": "2025-01-07T12:00:00Z",
+  "updated_at": "2025-01-07T12:00:00Z"
+}
+```
 
 ### GET /api/requests/course-change
 **Description**: Get a list of course change requests.
-**Access**: Super Admin, Coach Admin
+**Access**: Super Admin, Coach Admin (can only see requests for their own branch)
 **Query Parameters**:
 - `status`: Filter by status (pending, approved, rejected)
+**Response**:
+```json
+{
+  "requests": [
+    {
+      "id": "course-change-request-uuid",
+      "student_id": "student-uuid",
+      "branch_id": "branch-uuid",
+      "current_enrollment_id": "enrollment-uuid-old",
+      "new_course_id": "course-uuid-new",
+      "reason": "I would like to switch to the advanced course.",
+      "status": "pending",
+      "created_at": "2025-01-07T12:00:00Z",
+      "updated_at": "2025-01-07T12:00:00Z"
+    }
+  ]
+}
+```
 
 ### PUT /api/requests/course-change/{request_id}
 **Description**: Update a course change request (approve/reject). On approval, the student's old enrollment is deactivated and a new one is created for the new course.
-**Access**: Super Admin, Coach Admin
+**Access**: Super Admin, Coach Admin (can only manage requests for their own branch)
 **Request Body**:
 ```json
 {
   "status": "approved"
+}
+```
+**Response**:
+```json
+{
+  "message": "Course change request updated successfully.",
+  "request": {
+    "id": "course-change-request-uuid",
+    "student_id": "student-uuid",
+    "branch_id": "branch-uuid",
+    "current_enrollment_id": "enrollment-uuid-old",
+    "new_course_id": "course-uuid-new",
+    "reason": "I would like to switch to the advanced course.",
+    "status": "approved",
+    "created_at": "2025-01-07T12:00:00Z",
+    "updated_at": "2025-01-07T12:00:00Z"
+  }
 }
 ```
 
@@ -736,10 +1375,9 @@ A downloadable CSV file with the attendance records.
 
 ### GET /api/reports/dashboard
 **Description**: Get dashboard statistics
-**Access**: Based on role
+**Access**: Based on role (Super Admin can filter by branch; Coach Admin sees their branch's stats; Coach/Student see limited relevant stats)
 **Query Parameters**:
 - `branch_id`: Filter by branch (for Super Admin)
-
 **Response**:
 ```json
 {
@@ -759,14 +1397,55 @@ A downloadable CSV file with the attendance records.
 **Query Parameters**:
 - `start_date`: Filter by date range (ISO 8601 format)
 - `end_date`: Filter by date range (ISO 8601 format)
+**Response**:
+```json
+{
+  "total_collected": 100000.0,
+  "outstanding_dues": 15000.0,
+  "report_generated_at": "2025-01-07T12:00:00Z",
+  "start_date": "2025-01-01T00:00:00Z",
+  "end_date": "2025-01-31T23:59:59Z"
+}
+```
 
 ### GET /api/reports/branch/{branch_id}
 **Description**: Get a detailed report for a specific branch.
-**Access**: Super Admin, Coach Admin
-
-### GET /api/courses/{course_id}/stats
-**Description**: Get statistics for a specific course.
-**Access**: Super Admin, Coach Admin
+**Access**: Super Admin, Coach Admin (can only access reports for their own branch)
+**Response**:
+```json
+{
+  "branch_details": {
+    "id": "branch-uuid",
+    "name": "Downtown Branch",
+    "address": "123 Main St",
+    "city": "Springfield",
+    "state": "IL",
+    "pincode": "62701",
+    "phone": "+1234567890",
+    "email": "downtown@example.com",
+    "manager_id": "manager-uuid",
+    "is_active": true,
+    "business_hours": {},
+    "created_at": "2025-01-07T12:00:00Z",
+    "updated_at": "2025-01-07T12:00:00Z"
+  },
+  "total_students": 150,
+  "active_enrollments": 120,
+  "payments_summary": [
+    {
+      "_id": "paid",
+      "total_amount": 80000.0,
+      "count": 100
+    },
+    {
+      "_id": "pending",
+      "total_amount": 20000.0,
+      "count": 20
+    }
+  ],
+  "report_generated_at": "2025-01-07T12:00:00Z"
+}
+```
 
 ---
 
@@ -775,68 +1454,79 @@ A downloadable CSV file with the attendance records.
 ### POST /api/events
 **Description**: Create a new branch event.
 **Access**: Super Admin, Coach Admin
+**Request Body**:
+```json
+{
+  "title": "Annual Martial Arts Tournament",
+  "description": "Join us for our annual tournament!",
+  "start_time": "2025-03-10T09:00:00Z",
+  "end_time": "2025-03-10T17:00:00Z"
+}
+```
+**Response**:
+```json
+{
+  "id": "event-uuid",
+  "branch_id": "branch-uuid",
+  "title": "Annual Martial Arts Tournament",
+  "description": "Join us for our annual tournament!",
+  "start_time": "2025-03-10T09:00:00Z",
+  "end_time": "2025-03-10T17:00:00Z",
+  "created_by": "user-uuid",
+  "created_at": "2025-01-07T12:00:00Z"
+}
+```
 
 ### GET /api/events
 **Description**: Get events for a specific branch.
 **Access**: All authenticated users
-
-### PUT /api/events/{event_id}
-**Description**: Update a branch event.
-**Access**: Super Admin, Coach Admin
-
-### DELETE /api/events/{event_id}
-**Description**: Delete a branch event.
-**Access**: Super Admin, Coach Admin
-
----
-
-## 14. Payment Proof
-
-### POST /api/payments/{payment_id}/proof
-**Description**: Submit proof of payment for an offline transaction.
-**Access**: Student
-
-
-
-## Response Codes
-
-- `200`: Success
-- `201`: Created
-- `400`: Bad Request
-- `401`: Unauthorized
-- `403`: Forbidden
-- `404`: Not Found
-- `500`: Internal Server Error
-
-## Error Response Format
+**Query Parameters**:
+- `branch_id`: The ID of the branch to get events for.
+**Response**:
 ```json
 {
-  "detail": "Error message description"
+  "events": [
+    {
+      "id": "event-uuid",
+      "branch_id": "branch-uuid",
+      "title": "Annual Martial Arts Tournament",
+      "description": "Join us for our annual tournament!",
+      "start_time": "2025-03-10T09:00:00Z",
+      "end_time": "2025-03-10T17:00:00Z",
+      "created_by": "user-uuid",
+      "created_at": "2025-01-07T12:00:00Z"
+    }
+  ]
 }
 ```
 
+### PUT /api/events/{event_id}
+**Description**: Update a branch event.
+**Access**: Super Admin, Coach Admin (can only manage events for their own branch)
+**Request Body**:
+```json
+{
+  "title": "Updated Tournament Name",
+  "description": "New description for the tournament",
+  "start_time": "2025-03-10T09:00:00Z",
+  "end_time": "2025-03-10T18:00:00Z"
+}
+```
+**Response**:
+```json
+{
+  "message": "Event updated successfully"
+}
+```
+
+### DELETE /api/events/{event_id}
+**Description**: Delete a branch event.
+**Access**: Super Admin, Coach Admin (can only manage events for their own branch)
+**Response**: (No content) `204 No Content`
+
 ---
 
-## Integration Points for Later Implementation
-
-### 1. Firebase SMS Integration
-- **Purpose**: Send login credentials and payment reminders
-- **Endpoints**: Will be integrated into user creation and payment processing
-- **Required**: Firebase Service Account JSON, Project ID, Web API Key
-
-### 2. zaptra.in WhatsApp Integration
-- **Purpose**: Send course notifications, payment reminders, complaint alerts
-- **Endpoints**: Will be integrated into enrollment, payment, and complaint systems
-- **Required**: zaptra.in API key/token, API endpoint URL
-
-### 3. Biometric Integration
-- **Purpose**: Alternative attendance marking method
-- **Endpoints**: `/api/attendance/biometric` (to be implemented)
-- **Required**: Biometric device API specifications
-
----
-
-## 15. Admin & Auditing
+## 14. Admin & Auditing
 
 ### GET /api/admin/activity-logs
 **Description**: Get user activity logs (Super Admin only)
@@ -871,7 +1561,7 @@ A downloadable CSV file with the attendance records.
 
 ---
 
-## 16. Notification Management
+## 15. Notification Management
 
 ### POST /api/notifications/templates
 **Description**: Create a new notification template.
@@ -881,22 +1571,85 @@ A downloadable CSV file with the attendance records.
 {
   "name": "Payment Reminder",
   "type": "whatsapp",
+  "subject": "Payment Due",
   "body": "Hi {{student_name}}, a friendly reminder that your payment of {{amount}} is due on {{due_date}}."
+}
+```
+**Response**:
+```json
+{
+  "id": "template-uuid",
+  "name": "Payment Reminder",
+  "type": "whatsapp",
+  "subject": "Payment Due",
+  "body": "Hi {{student_name}}, a friendly reminder that your payment of {{amount}} is due on {{due_date}}.",
+  "is_active": true,
+  "created_at": "2025-01-07T12:00:00Z",
+  "updated_at": "2025-01-07T12:00:00Z"
 }
 ```
 
 ### GET /api/notifications/templates
 **Description**: Get all notification templates.
 **Access**: Super Admin
+**Response**:
+```json
+{
+  "templates": [
+    {
+      "id": "template-uuid",
+      "name": "Payment Reminder",
+      "type": "whatsapp",
+      "subject": "Payment Due",
+      "body": "Hi {{student_name}}, a friendly reminder that your payment of {{amount}} is due on {{due_date}}.",
+      "is_active": true,
+      "created_at": "2025-01-07T12:00:00Z",
+      "updated_at": "2025-01-07T12:00:00Z"
+    }
+  ]
+}
+```
+
+### GET /api/notifications/templates/{template_id}
+**Description**: Get a single notification template by ID.
+**Access**: Super Admin
+**Response**:
+```json
+{
+  "id": "template-uuid",
+  "name": "Payment Reminder",
+  "type": "whatsapp",
+  "subject": "Payment Due",
+  "body": "Hi {{student_name}}, a friendly reminder that your payment of {{amount}} is due on {{due_date}}.",
+  "is_active": true,
+  "created_at": "2025-01-07T12:00:00Z",
+  "updated_at": "2025-01-07T12:00:00Z"
+}
+```
 
 ### PUT /api/notifications/templates/{template_id}
 **Description**: Update a notification template.
 **Access**: Super Admin
 **Request Body**: (Same as create)
+```json
+{
+  "name": "Updated Payment Reminder",
+  "type": "whatsapp",
+  "subject": "Updated Payment Due",
+  "body": "Hi {{student_name}}, your payment of {{amount}} is now due on {{due_date}}. Please pay soon."
+}
+```
+**Response**:
+```json
+{
+  "message": "Template updated successfully"
+}
+```
 
 ### DELETE /api/notifications/templates/{template_id}
 **Description**: Delete a notification template.
 **Access**: Super Admin
+**Response**: (No content) `204 No Content`
 
 ### POST /api/notifications/trigger
 **Description**: Trigger a notification for a specific user using a template.
@@ -913,9 +1666,15 @@ A downloadable CSV file with the attendance records.
   }
 }
 ```
+**Response**:
+```json
+{
+  "message": "Notification sent successfully."
+}
+```
 
 ### POST /api/notifications/broadcast
-**Description**: Broadcast a notification to all users, or all users in a specific branch. **This can be used for branch-wide announcements.**
+**Description**: Broadcast a notification to all users, or all users in a specific branch. This can be used for branch-wide announcements. Coach Admins can only broadcast to their own branch.
 **Access**: Super Admin, Coach Admin
 **Request Body**:
 ```json
@@ -925,6 +1684,12 @@ A downloadable CSV file with the attendance records.
   "context": {
     "event_name": "Holiday Closure"
   }
+}
+```
+**Response**:
+```json
+{
+  "message": "Broadcast sent. Attempted to notify [X] users, successfully sent to [Y]."
 }
 ```
 
@@ -957,10 +1722,10 @@ A downloadable CSV file with the attendance records.
 
 ---
 
-## 17. Reminders
+## 16. Reminders
 
 ### POST /api/reminders/class
-**Description**: Triggers class reminders for all students enrolled in a specific course. In a real-world application, this would be called by a scheduled job (e.g., daily).
+**Description**: Triggers class reminders for all students enrolled in a specific course/branch. In a real-world application, this would be called by a scheduled job (e.g., daily).
 **Access**: Super Admin, Coach Admin
 **Request Body**:
 ```json
@@ -975,6 +1740,45 @@ A downloadable CSV file with the attendance records.
   "message": "Sent [X] class reminders for course '[Course Name]'."
 }
 ```
+
+---
+
+## Response Codes
+
+- `200`: Success
+- `201`: Created
+- `204`: No Content (for successful deletions)
+- `400`: Bad Request
+- `401`: Unauthorized
+- `403`: Forbidden
+- `404`: Not Found
+- `500`: Internal Server Error
+
+## Error Response Format
+```json
+{
+  "detail": "Error message description"
+}
+```
+
+---
+
+## Integration Points for Later Implementation
+
+### 1. Firebase SMS Integration
+- **Purpose**: Send login credentials and payment reminders
+- **Endpoints**: Will be integrated into user creation and payment processing
+- **Required**: Firebase Service Account JSON, Project ID, Web API Key
+
+### 2. zaptra.in WhatsApp Integration
+- **Purpose**: Send course notifications, payment reminders, complaint alerts
+- **Endpoints**: Will be integrated into enrollment, payment, and complaint systems
+- **Required**: zaptra.in API key/token, API endpoint URL
+
+### 3. Biometric Integration
+- **Purpose**: Alternative attendance marking method
+- **Endpoints**: `/api/attendance/biometric` (to be implemented)
+- **Required**: Biometric device API specifications
 
 ---
 
