@@ -2,7 +2,7 @@ import pytest
 from fastapi.testclient import TestClient
 from backend.server import app, db
 import pymongo
-from datetime import datetime
+from datetime import datetime, timedelta
 
 @pytest.fixture(scope="function", autouse=True)
 def setup_database():
@@ -601,6 +601,55 @@ def test_student_transfer_request():
         updated_student_data = me_response.json()
         assert updated_student_data["branch_id"] == branch2_id
 
+def test_branch_event_management():
+    """Test the branch event management CRUD flow."""
+    with TestClient(app) as client:
+        # Setup: Create Super Admin, a branch, and a Coach Admin
+        super_admin_token = get_token(client, "super_admin")
+        branch_data = {"name": "Event Branch", "address": "123 Event St", "city": "Eventville", "state": "ES", "pincode": "88888", "phone": "+8888888888", "email": "event@test.com"}
+        branch_response = client.post("/api/branches", json=branch_data, headers={"Authorization": f"Bearer {super_admin_token}"})
+        branch_id = branch_response.json()["branch_id"]
+
+        ca_email = "ca.event@test.com"
+        ca_pass = "p"
+        ca_data = {"email": ca_email, "password": ca_pass, "full_name": "Event CA", "phone": "ca_event", "role": "coach_admin", "branch_id": branch_id}
+        client.post("/api/users", json=ca_data, headers={"Authorization": f"Bearer {super_admin_token}"})
+        ca_token = client.post("/api/auth/login", json={"email": ca_email, "password": ca_pass}).json()["access_token"]
+
+        # 1. Create Event
+        event_data = {
+            "title": "Special Training Session",
+            "description": "A special session with a guest coach.",
+            "start_time": (datetime.now() + timedelta(days=7)).isoformat(),
+            "end_time": (datetime.now() + timedelta(days=7, hours=2)).isoformat()
+        }
+        create_response = client.post("/api/events", json=event_data, headers={"Authorization": f"Bearer {ca_token}"})
+        assert create_response.status_code == 201
+        event = create_response.json()
+        event_id = event["id"]
+
+        # 2. Get Events
+        get_response = client.get(f"/api/events?branch_id={branch_id}", headers={"Authorization": f"Bearer {ca_token}"})
+        assert get_response.status_code == 200
+        events = get_response.json()["events"]
+        assert len(events) == 1
+        assert events[0]["title"] == "Special Training Session"
+
+        # 3. Update Event
+        update_data = {"title": "Updated Training Session"}
+        update_response = client.put(f"/api/events/{event_id}", json={**event_data, **update_data}, headers={"Authorization": f"Bearer {ca_token}"})
+        assert update_response.status_code == 200
+
+        # 4. Delete Event
+        delete_response = client.delete(f"/api/events/{event_id}", headers={"Authorization": f"Bearer {ca_token}"})
+        assert delete_response.status_code == 204
+
+        # 5. Verify Deletion
+        get_response_after_delete = client.get(f"/api/events?branch_id={branch_id}", headers={"Authorization": f"Bearer {ca_token}"})
+        assert get_response_after_delete.status_code == 200
+        events_after_delete = get_response_after_delete.json()["events"]
+        assert len(events_after_delete) == 0
+
 def test_course_stats():
     """Test the course statistics endpoint."""
     with TestClient(app) as client:
@@ -629,6 +678,70 @@ def test_course_stats():
         stats = stats_response.json()
 
         assert stats["active_enrollments"] == 2
+
+def test_view_coach_ratings():
+    """Test viewing the ratings for a coach."""
+    with TestClient(app) as client:
+        # Setup
+        admin_token = get_token(client, "super_admin")
+        branch_data = {"name": "Rating Branch", "address": "123 Rating St", "city": "Ratingville", "state": "RS", "pincode": "99999", "phone": "+9999999999", "email": "rating@test.com"}
+        branch_response = client.post("/api/branches", json=branch_data, headers={"Authorization": f"Bearer {admin_token}"})
+        branch_id = branch_response.json()["branch_id"]
+
+        coach_data = {"email": "rating.coach@test.com", "password": "p", "full_name": "Rating Coach", "phone": "rc", "role": "coach", "branch_id": branch_id}
+        coach_id = client.post("/api/users", json=coach_data, headers={"Authorization": f"Bearer {admin_token}"}).json()["user_id"]
+
+        student_token = get_token(client, "student", branch_id=branch_id)
+
+        # Student submits two ratings
+        client.post("/api/feedback/coaches", json={"coach_id": coach_id, "rating": 5, "review": "Excellent!"}, headers={"Authorization": f"Bearer {student_token}"})
+        client.post("/api/feedback/coaches", json={"coach_id": coach_id, "rating": 4, "review": "Very good."}, headers={"Authorization": f"Bearer {student_token}"})
+
+        # Get ratings for the coach
+        ratings_response = client.get(f"/api/coaches/{coach_id}/ratings", headers={"Authorization": f"Bearer {admin_token}"})
+        assert ratings_response.status_code == 200
+        ratings = ratings_response.json()["ratings"]
+        assert len(ratings) == 2
+
+def test_submit_payment_proof():
+    """Test submitting proof of payment."""
+    with TestClient(app) as client:
+        # Setup
+        admin_token = get_token(client, "super_admin")
+        branch_data = {"name": "Proof Branch", "address": "123 Proof St", "city": "Proofville", "state": "PS", "pincode": "77777", "phone": "+7777777777", "email": "proof@test.com"}
+        branch_response = client.post("/api/branches", json=branch_data, headers={"Authorization": f"Bearer {admin_token}"})
+        branch_id = branch_response.json()["branch_id"]
+
+        course_data = {"name": "Proof Course", "description": "A test course", "duration_months": 1, "base_fee": 100}
+        course_response = client.post("/api/courses", json=course_data, headers={"Authorization": f"Bearer {admin_token}"})
+        course_id = course_response.json()["course_id"]
+
+        student_email = "proof.student@test.com"
+        student_pass = "password"
+        s1_data = {"email": student_email, "password": student_pass, "full_name": "Proof Student", "phone": "4", "role": "student", "branch_id": branch_id}
+        s1_id = client.post("/api/auth/register", json=s1_data).json()["user_id"]
+        e1_data = {"student_id": s1_id, "course_id": course_id, "branch_id": branch_id, "start_date": datetime.now().isoformat(), "fee_amount": 100.0}
+        e1_id = client.post("/api/enrollments", json=e1_data, headers={"Authorization": f"Bearer {admin_token}"}).json()["enrollment_id"]
+
+        payments = client.get(f"/api/payments?enrollment_id={e1_id}", headers={"Authorization": f"Bearer {admin_token}"}).json()["payments"]
+        payment_to_update = payments[0]
+
+        # Login as student
+        student_token = client.post("/api/auth/login", json={"email": student_email, "password": student_pass}).json()["access_token"]
+
+        # Submit proof
+        proof_data = {"proof": "transaction_id_12345"}
+        proof_response = client.post(f"/api/payments/{payment_to_update['id']}/proof", json=proof_data, headers={"Authorization": f"Bearer {student_token}"})
+        assert proof_response.status_code == 200
+
+        # Verify in DB
+        mongo_client = pymongo.MongoClient("mongodb://localhost:27017")
+        db = mongo_client["student_management_db"]
+        updated_payment = db.payments.find_one({"id": payment_to_update['id']})
+        mongo_client.close()
+
+        assert updated_payment is not None
+        assert updated_payment["payment_proof"] == "transaction_id_12345"
 
 def test_overdue_payment_restriction():
     """Test access restriction for students with overdue payments."""

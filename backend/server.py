@@ -225,7 +225,11 @@ class Payment(BaseModel):
     payment_date: Optional[datetime] = None
     due_date: datetime
     notes: Optional[str] = None
+    payment_proof: Optional[str] = None  # URL or reference to the proof
     created_at: datetime = Field(default_factory=datetime.utcnow)
+
+class PaymentProof(BaseModel):
+    proof: str
 
 class PaymentCreate(BaseModel):
     student_id: str
@@ -790,6 +794,85 @@ async def update_transfer_request(
 
     return {"message": "Transfer request updated successfully.", "request": serialize_doc(updated_request)}
 
+# BRANCH EVENT MANAGEMENT
+class Event(BaseModel):
+    id: str = Field(default_factory=lambda: str(uuid.uuid4()))
+    branch_id: str
+    title: str
+    description: str
+    start_time: datetime
+    end_time: datetime
+    created_by: str
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+
+class EventCreate(BaseModel):
+    title: str
+    description: str
+    start_time: datetime
+    end_time: datetime
+
+@api_router.post("/events", status_code=status.HTTP_201_CREATED)
+async def create_event(
+    event_data: EventCreate,
+    current_user: dict = Depends(require_role([UserRole.SUPER_ADMIN, UserRole.COACH_ADMIN]))
+):
+    """Create a new branch event."""
+    if not current_user.get("branch_id"):
+        raise HTTPException(status_code=400, detail="User is not assigned to a branch.")
+
+    event = Event(
+        **event_data.dict(),
+        branch_id=current_user["branch_id"],
+        created_by=current_user["id"]
+    )
+    await db.events.insert_one(event.dict())
+    return event
+
+@api_router.get("/events")
+async def get_events(
+    branch_id: str,
+    current_user: dict = Depends(get_current_active_user)
+):
+    """Get events for a specific branch."""
+    events = await db.events.find({"branch_id": branch_id}).to_list(1000)
+    return {"events": serialize_doc(events)}
+
+@api_router.put("/events/{event_id}")
+async def update_event(
+    event_id: str,
+    event_data: EventCreate,
+    current_user: dict = Depends(require_role([UserRole.SUPER_ADMIN, UserRole.COACH_ADMIN]))
+):
+    """Update a branch event."""
+    event = await db.events.find_one({"id": event_id})
+    if not event:
+        raise HTTPException(status_code=404, detail="Event not found")
+
+    if event["branch_id"] != current_user.get("branch_id"):
+        raise HTTPException(status_code=403, detail="You can only manage events for your own branch.")
+
+    await db.events.update_one(
+        {"id": event_id},
+        {"$set": event_data.dict()}
+    )
+    return {"message": "Event updated successfully"}
+
+@api_router.delete("/events/{event_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_event(
+    event_id: str,
+    current_user: dict = Depends(require_role([UserRole.SUPER_ADMIN, UserRole.COACH_ADMIN]))
+):
+    """Delete a branch event."""
+    event = await db.events.find_one({"id": event_id})
+    if not event:
+        raise HTTPException(status_code=404, detail="Event not found")
+
+    if event["branch_id"] != current_user.get("branch_id"):
+        raise HTTPException(status_code=403, detail="You can only manage events for your own branch.")
+
+    await db.events.delete_one({"id": event_id})
+    return
+
 
 @api_router.delete("/users/{user_id}")
 async def deactivate_user(
@@ -1246,6 +1329,23 @@ async def update_payment(
 
     return {"message": "Payment updated successfully"}
 
+@api_router.post("/payments/{payment_id}/proof")
+async def submit_payment_proof(
+    payment_id: str,
+    proof_data: PaymentProof,
+    current_user: dict = Depends(require_role([UserRole.STUDENT]))
+):
+    """Submit proof of payment for an offline transaction."""
+    payment = await db.payments.find_one({"id": payment_id, "student_id": current_user["id"]})
+    if not payment:
+        raise HTTPException(status_code=404, detail="Payment not found or you do not have permission to update it.")
+
+    await db.payments.update_one(
+        {"id": payment_id},
+        {"$set": {"payment_proof": proof_data.proof, "updated_at": datetime.utcnow()}}
+    )
+    return {"message": "Payment proof submitted successfully."}
+
 @api_router.get("/payments")
 async def get_payments(
     student_id: Optional[str] = None,
@@ -1487,6 +1587,15 @@ async def rate_coach(
     
     await db.coach_ratings.insert_one(rating.dict())
     return {"message": "Rating submitted successfully", "rating_id": rating.id}
+
+@api_router.get("/coaches/{coach_id}/ratings")
+async def get_coach_ratings(
+    coach_id: str,
+    current_user: dict = Depends(get_current_active_user)
+):
+    """Get all ratings for a specific coach."""
+    ratings = await db.coach_ratings.find({"coach_id": coach_id}).to_list(1000)
+    return {"ratings": serialize_doc(ratings)}
 
 # SESSION BOOKING SYSTEM
 @api_router.post("/sessions/book")
