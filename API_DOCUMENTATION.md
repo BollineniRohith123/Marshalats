@@ -102,13 +102,46 @@ Authorization: Bearer <your_jwt_token>
 }
 ```
 
+### POST /api/auth/forgot-password
+**Description**: Initiate password reset
+**Access**: Public
+**Request Body**:
+```json
+{
+  "email": "user@example.com"
+}
+```
+**Response**:
+```json
+{
+  "message": "If an account with that email exists, a password reset link has been sent."
+}
+```
+
+### POST /api/auth/reset-password
+**Description**: Reset password with a valid token
+**Access**: Public
+**Request Body**:
+```json
+{
+  "token": "your_reset_token_here",
+  "new_password": "YourNewPassword123!"
+}
+```
+**Response**:
+```json
+{
+  "message": "Password has been reset successfully."
+}
+```
+
 ---
 
-## 2. User Management (Super Admin Only)
+## 2. User Management
 
 ### POST /api/users
 **Description**: Create new user
-**Access**: Super Admin
+**Access**: Super Admin, Coach Admin
 **Request Body**:
 ```json
 {
@@ -146,8 +179,8 @@ Authorization: Bearer <your_jwt_token>
 ```
 
 ### PUT /api/users/{user_id}
-**Description**: Update user
-**Access**: Super Admin
+**Description**: Update user. Coach Admins can only update students in their own branch.
+**Access**: Super Admin, Coach Admin
 
 ### DELETE /api/users/{user_id}
 **Description**: Deactivate user
@@ -379,6 +412,17 @@ Authorization: Bearer <your_jwt_token>
 - `branch_id`: Filter by branch availability
 - `category`: Filter by category
 
+### PUT /api/products/{product_id}
+**Description**: Update product details.
+**Access**: Super Admin
+**Request Body**:
+```json
+{
+  "name": "Updated Training Gloves",
+  "price": 275.0
+}
+```
+
 ### POST /api/products/purchase
 **Description**: Record offline product purchase
 **Access**: All authenticated users
@@ -392,6 +436,13 @@ Authorization: Bearer <your_jwt_token>
   "payment_method": "cash"
 }
 ```
+
+### GET /api/products/purchases
+**Description**: Get product purchases with filtering. Students can only view their own purchases.
+**Access**: All authenticated users
+**Query Parameters**:
+- `student_id`: Filter by student (Admin only)
+- `branch_id`: Filter by branch (Admin only)
 
 ---
 
@@ -467,7 +518,38 @@ Authorization: Bearer <your_jwt_token>
 
 ---
 
-## 11. Reporting & Analytics
+## 11. Student Transfer Requests
+
+### POST /api/requests/transfer
+**Description**: Create a new transfer request.
+**Access**: Student
+**Request Body**:
+```json
+{
+  "new_branch_id": "new-branch-uuid",
+  "reason": "Moving to a new city."
+}
+```
+
+### GET /api/requests/transfer
+**Description**: Get a list of transfer requests.
+**Access**: Super Admin, Coach Admin
+**Query Parameters**:
+- `status`: Filter by status (pending, approved, rejected)
+
+### PUT /api/requests/transfer/{request_id}
+**Description**: Update a transfer request (approve/reject).
+**Access**: Super Admin, Coach Admin
+**Request Body**:
+```json
+{
+  "status": "approved"
+}
+```
+
+---
+
+## 12. Reporting & Analytics
 
 ### GET /api/reports/dashboard
 **Description**: Get dashboard statistics
@@ -487,6 +569,54 @@ Authorization: Bearer <your_jwt_token>
   }
 }
 ```
+
+### GET /api/reports/financial
+**Description**: Get a financial report summary.
+**Access**: Super Admin
+
+### GET /api/reports/branch/{branch_id}
+**Description**: Get a detailed report for a specific branch.
+**Access**: Super Admin, Coach Admin
+
+### GET /api/courses/{course_id}/stats
+**Description**: Get statistics for a specific course.
+**Access**: Super Admin, Coach Admin
+
+---
+
+## 13. Branch Event Management
+
+### POST /api/events
+**Description**: Create a new branch event.
+**Access**: Super Admin, Coach Admin
+
+### GET /api/events
+**Description**: Get events for a specific branch.
+**Access**: All authenticated users
+
+### PUT /api/events/{event_id}
+**Description**: Update a branch event.
+**Access**: Super Admin, Coach Admin
+
+### DELETE /api/events/{event_id}
+**Description**: Delete a branch event.
+**Access**: Super Admin, Coach Admin
+
+---
+
+## 14. Payment Proof
+
+### POST /api/payments/{payment_id}/proof
+**Description**: Submit proof of payment for an offline transaction.
+**Access**: Student
+
+---
+
+## 15. Coach Ratings
+
+### GET /api/coaches/{coach_id}/ratings
+**Description**: Get all ratings for a specific coach.
+**Access**: All authenticated users
 
 ---
 
