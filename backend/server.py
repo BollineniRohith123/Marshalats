@@ -106,6 +106,13 @@ class UserLogin(BaseModel):
     email: EmailStr
     password: str
 
+class ForgotPassword(BaseModel):
+    email: EmailStr
+
+class ResetPassword(BaseModel):
+    token: str
+    new_password: str
+
 class UserUpdate(BaseModel):
     email: Optional[EmailStr] = None
     phone: Optional[str] = None
@@ -284,6 +291,15 @@ class ProductCreate(BaseModel):
     price: float
     branch_availability: Optional[Dict[str, int]] = {}
     image_url: Optional[str] = None
+
+class ProductUpdate(BaseModel):
+    name: Optional[str] = None
+    description: Optional[str] = None
+    category: Optional[str] = None
+    price: Optional[float] = None
+    branch_availability: Optional[Dict[str, int]] = None
+    image_url: Optional[str] = None
+    is_active: Optional[bool] = None
 
 class ProductPurchase(BaseModel):
     id: str = Field(default_factory=lambda: str(uuid.uuid4()))
@@ -505,6 +521,61 @@ async def login(user_credentials: UserLogin):
         "role": user["role"],
         "full_name": user["full_name"]
     }}
+
+@api_router.post("/auth/forgot-password")
+async def forgot_password(forgot_password_data: ForgotPassword):
+    """Initiate password reset process"""
+    user = await db.users.find_one({"email": forgot_password_data.email})
+    if not user:
+        # Don't reveal that the user does not exist
+        return {"message": "If an account with that email exists, a password reset link has been sent."}
+
+    # Generate a short-lived token for password reset
+    reset_token = create_access_token(
+        data={"sub": user["id"], "scope": "password_reset"},
+        expires_delta=timedelta(minutes=15)
+    )
+
+    # In a real application, you would email this token to the user
+    # For this example, we'll just log it.
+    logging.info(f"Password reset token for {user['email']}: {reset_token}")
+
+    await send_sms(user["phone"], f"Your password reset token is: {reset_token}")
+
+    response = {"message": "If an account with that email exists, a password reset link has been sent."}
+    if os.environ.get("TESTING") == "True":
+        response["reset_token"] = reset_token
+    return response
+
+@api_router.post("/auth/reset-password")
+async def reset_password(reset_password_data: ResetPassword):
+    """Reset password using a token"""
+    try:
+        payload = jwt.decode(
+            reset_password_data.token,
+            SECRET_KEY,
+            algorithms=[ALGORITHM]
+        )
+        if payload.get("scope") != "password_reset":
+            raise HTTPException(status_code=401, detail="Invalid token scope")
+
+        user_id = payload.get("sub")
+        if not user_id:
+            raise HTTPException(status_code=401, detail="Invalid token")
+
+    except jwt.PyJWTError:
+        raise HTTPException(status_code=401, detail="Invalid or expired token")
+
+    new_hashed_password = hash_password(reset_password_data.new_password)
+    result = await db.users.update_one(
+        {"id": user_id},
+        {"$set": {"password": new_hashed_password, "updated_at": datetime.utcnow()}}
+    )
+
+    if result.matched_count == 0:
+        raise HTTPException(status_code=404, detail="User not found")
+
+    return {"message": "Password has been reset successfully."}
 
 @api_router.get("/auth/me")
 async def get_current_user_info(current_user: dict = Depends(get_current_active_user)):
@@ -876,10 +947,6 @@ async def scan_qr_attendance(
     current_user: dict = Depends(get_current_active_user)
 ):
     """Mark attendance via QR code scan"""
-    print(f"--- Entering scan_qr_attendance ---")
-    print(f"QR Code: {qr_code}")
-    print(f"Current user: {current_user['id']}")
-
     if current_user["role"] != "student":
         raise HTTPException(status_code=403, detail="Only students can scan QR codes")
     
@@ -889,7 +956,6 @@ async def scan_qr_attendance(
         "is_active": True,
         "valid_until": {"$gt": datetime.utcnow()}
     })
-    print(f"QR Session: {qr_session}")
     
     if not qr_session:
         raise HTTPException(status_code=400, detail="Invalid or expired QR code")
@@ -901,7 +967,6 @@ async def scan_qr_attendance(
         "branch_id": qr_session["branch_id"],
         "is_active": True
     })
-    print(f"Enrollment: {enrollment}")
     
     if not enrollment:
         raise HTTPException(status_code=400, detail="You are not enrolled in this course")
@@ -916,7 +981,6 @@ async def scan_qr_attendance(
             "$lt": datetime.combine(today + timedelta(days=1), datetime.min.time())
         }
     })
-    print(f"Existing attendance: {existing_attendance}")
     
     if existing_attendance:
         raise HTTPException(status_code=400, detail="Attendance already marked for today")
@@ -934,7 +998,6 @@ async def scan_qr_attendance(
     
     await db.attendance.insert_one(attendance.dict())
     
-    print(f"--- Exiting scan_qr_attendance ---")
     return {"message": "Attendance marked successfully", "attendance_id": attendance.id}
 
 @api_router.post("/attendance/manual")
@@ -1097,6 +1160,52 @@ async def get_products(
         products = [p for p in products if branch_id in p.get("branch_availability", {})]
     
     return {"products": serialize_doc(products)}
+
+@api_router.put("/products/{product_id}")
+async def update_product(
+    product_id: str,
+    product_update: ProductUpdate,
+    current_user: dict = Depends(require_role([UserRole.SUPER_ADMIN]))
+):
+    """Update product details (Super Admin only)"""
+    update_data = {k: v for k, v in product_update.dict(exclude_unset=True).items()}
+    if not update_data:
+        raise HTTPException(status_code=400, detail="No update data provided")
+
+    update_data["updated_at"] = datetime.utcnow()
+
+    result = await db.products.update_one(
+        {"id": product_id},
+        {"$set": update_data}
+    )
+
+    if result.matched_count == 0:
+        raise HTTPException(status_code=404, detail="Product not found")
+
+    return {"message": "Product updated successfully"}
+
+@api_router.get("/products/purchases")
+async def get_product_purchases(
+    student_id: Optional[str] = None,
+    branch_id: Optional[str] = None,
+    skip: int = 0,
+    limit: int = 50,
+    current_user: dict = Depends(get_current_active_user)
+):
+    """Get product purchases with filtering"""
+    filter_query = {}
+    if student_id:
+        filter_query["student_id"] = student_id
+    if branch_id:
+        filter_query["branch_id"] = branch_id
+
+    if current_user["role"] == UserRole.STUDENT:
+        filter_query["student_id"] = current_user["id"]
+    elif current_user["role"] == UserRole.COACH_ADMIN:
+        filter_query["branch_id"] = current_user.get("branch_id")
+
+    purchases = await db.product_purchases.find(filter_query).skip(skip).limit(limit).to_list(length=limit)
+    return {"purchases": serialize_doc(purchases)}
 
 @api_router.post("/products/purchase")
 async def purchase_product(

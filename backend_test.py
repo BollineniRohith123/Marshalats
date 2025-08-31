@@ -124,7 +124,7 @@ def test_complaint_submission():
         assert "complaint_id" in complaint_response.json()
 
 def test_product_management():
-    """Test creating and then getting a product."""
+    """Test creating, updating, and then getting a product."""
     with TestClient(app) as client:
         admin_token = get_token(client, "super_admin")
         
@@ -137,14 +137,22 @@ def test_product_management():
         }
         create_response = client.post("/api/products", json=product_data, headers={"Authorization": f"Bearer {admin_token}"})
         assert create_response.status_code == 200
+        product_id = create_response.json()["product_id"]
         
-        # Get products
+        # Update the product
+        update_data = {"price": 1600.0, "description": "High-quality white karate gi with belt"}
+        update_response = client.put(f"/api/products/{product_id}", json=update_data, headers={"Authorization": f"Bearer {admin_token}"})
+        assert update_response.status_code == 200
+
+        # Get the product again to verify the update
         get_response = client.get("/api/products", headers={"Authorization": f"Bearer {admin_token}"})
         assert get_response.status_code == 200
         
         products = get_response.json()["products"]
         assert len(products) == 1
         assert products[0]["name"] == "Karate Uniform"
+        assert products[0]["price"] == 1600.0
+        assert products[0]["description"] == "High-quality white karate gi with belt"
 
 def test_student_enrollment():
     """Test enrolling a student in a course."""
@@ -308,3 +316,74 @@ def test_qr_code_scanning():
         scan_response = client.post(f"/api/attendance/scan-qr?qr_code={qr_code_to_scan}", headers={"Authorization": f"Bearer {student_token}"})
         assert scan_response.status_code == 200
         assert "attendance_id" in scan_response.json()
+
+def test_view_purchase_history():
+    """Test viewing purchase history."""
+    with TestClient(app) as client:
+        admin_token = get_token(client, "super_admin")
+
+        # Create branch, product, and student
+        branch_data = {"name": "Test Branch", "address": "123 Test St", "city": "Testville", "state": "TS", "pincode": "12345", "phone": "+1234567890", "email": "test@test.com"}
+        branch_response = client.post("/api/branches", json=branch_data, headers={"Authorization": f"Bearer {admin_token}"})
+        branch_id = branch_response.json()["branch_id"]
+        product_data = {"name": "Test Product", "description": "A test product", "category": "test", "price": 10.0, "branch_availability": {branch_id: 10}}
+        product_response = client.post("/api/products", json=product_data, headers={"Authorization": f"Bearer {admin_token}"})
+        product_id = product_response.json()["product_id"]
+        student_user_data = {"email": "purchasestudent@edumanage.com", "password": "Student123!", "full_name": "Purchase Student", "phone": "+919876543217", "role": "student", "branch_id": branch_id}
+        reg_response = client.post("/api/auth/register", json=student_user_data)
+        student_id = reg_response.json()["user_id"]
+
+        # Login as the new student to get their token
+        login_response = client.post("/api/auth/login", json={
+            "email": student_user_data["email"],
+            "password": student_user_data["password"]
+        })
+        student_token = login_response.json()["access_token"]
+
+        # Record a purchase
+        purchase_data = {"student_id": student_id, "product_id": product_id, "branch_id": branch_id, "quantity": 1, "payment_method": "cash"}
+        client.post("/api/products/purchase", json=purchase_data, headers={"Authorization": f"Bearer {student_token}"})
+
+        # Get purchase history as student
+        student_history_response = client.get("/api/products/purchases", headers={"Authorization": f"Bearer {student_token}"})
+        assert student_history_response.status_code == 200
+        student_purchases = student_history_response.json()["purchases"]
+        assert len(student_purchases) == 1
+        assert student_purchases[0]["product_id"] == product_id
+
+        # Get purchase history as admin
+        admin_history_response = client.get(f"/api/products/purchases?student_id={student_id}", headers={"Authorization": f"Bearer {admin_token}"})
+        assert admin_history_response.status_code == 200
+        admin_purchases = admin_history_response.json()["purchases"]
+        assert len(admin_purchases) == 1
+        assert admin_purchases[0]["product_id"] == product_id
+
+def test_password_reset():
+    """Test the password reset flow."""
+    with TestClient(app) as client:
+        # Create a user
+        user_email = "resetstudent@edumanage.com"
+        user_pass = "Student123!"
+        user_data = {
+            "email": user_email,
+            "password": user_pass,
+            "full_name": "Reset Student",
+            "phone": "+919876543218",
+            "role": "student"
+        }
+        client.post("/api/auth/register", json=user_data)
+
+        # 1. Forgot Password
+        forgot_response = client.post("/api/auth/forgot-password", json={"email": user_email})
+        assert forgot_response.status_code == 200
+        reset_token = forgot_response.json()["reset_token"]
+
+        # 2. Reset Password
+        new_password = "NewPassword123!"
+        reset_response = client.post("/api/auth/reset-password", json={"token": reset_token, "new_password": new_password})
+        assert reset_response.status_code == 200
+
+        # 3. Login with new password
+        login_response = client.post("/api/auth/login", json={"email": user_email, "password": new_password})
+        assert login_response.status_code == 200
+        assert "access_token" in login_response.json()
