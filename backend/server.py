@@ -26,12 +26,23 @@ ROOT_DIR = Path(__file__).parent
 load_dotenv(ROOT_DIR / '.env')
 
 # MongoDB connection
-mongo_url = os.environ.get('MONGO_URL', 'mongodb://localhost:27017')
-client = AsyncIOMotorClient(mongo_url)
-db = client[os.environ.get('DB_NAME', 'student_management_db')]
+db = None
+
+from contextlib import asynccontextmanager
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    global db
+    mongo_url = os.environ.get('MONGO_URL', 'mongodb://localhost:27017')
+    client = AsyncIOMotorClient(mongo_url)
+    db = client[os.environ.get('DB_NAME', 'student_management_db')]
+    print("Database connection opened.")
+    yield
+    client.close()
+    print("Database connection closed.")
 
 # Create FastAPI app
-app = FastAPI(title="Student Management System", version="1.0.0")
+app = FastAPI(title="Student Management System", version="1.0.0", lifespan=lifespan)
 api_router = APIRouter(prefix="/api")
 
 # Security setup
@@ -865,6 +876,10 @@ async def scan_qr_attendance(
     current_user: dict = Depends(get_current_active_user)
 ):
     """Mark attendance via QR code scan"""
+    print(f"--- Entering scan_qr_attendance ---")
+    print(f"QR Code: {qr_code}")
+    print(f"Current user: {current_user['id']}")
+
     if current_user["role"] != "student":
         raise HTTPException(status_code=403, detail="Only students can scan QR codes")
     
@@ -874,6 +889,7 @@ async def scan_qr_attendance(
         "is_active": True,
         "valid_until": {"$gt": datetime.utcnow()}
     })
+    print(f"QR Session: {qr_session}")
     
     if not qr_session:
         raise HTTPException(status_code=400, detail="Invalid or expired QR code")
@@ -885,6 +901,7 @@ async def scan_qr_attendance(
         "branch_id": qr_session["branch_id"],
         "is_active": True
     })
+    print(f"Enrollment: {enrollment}")
     
     if not enrollment:
         raise HTTPException(status_code=400, detail="You are not enrolled in this course")
@@ -899,6 +916,7 @@ async def scan_qr_attendance(
             "$lt": datetime.combine(today + timedelta(days=1), datetime.min.time())
         }
     })
+    print(f"Existing attendance: {existing_attendance}")
     
     if existing_attendance:
         raise HTTPException(status_code=400, detail="Attendance already marked for today")
@@ -916,6 +934,7 @@ async def scan_qr_attendance(
     
     await db.attendance.insert_one(attendance.dict())
     
+    print(f"--- Exiting scan_qr_attendance ---")
     return {"message": "Attendance marked successfully", "attendance_id": attendance.id}
 
 @api_router.post("/attendance/manual")
@@ -1122,7 +1141,7 @@ async def create_complaint(
     complaint = Complaint(
         **complaint_data.dict(),
         student_id=current_user["id"],
-        branch_id=current_user.get("branch_id", "")
+        branch_id=current_user.get("branch_id") or ""
     )
     
     await db.complaints.insert_one(complaint.dict())
@@ -1310,7 +1329,3 @@ app.include_router(api_router)
 @app.get("/")
 async def health_check():
     return {"status": "OK", "message": "Student Management System API", "version": "1.0.0"}
-
-@app.on_event("shutdown")
-async def shutdown_db_client():
-    client.close()
