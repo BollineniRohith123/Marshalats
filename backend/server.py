@@ -566,7 +566,7 @@ async def get_users(
     for user in users:
         user.pop("password", None)
     
-    return {"users": users, "total": len(users)}
+    return {"users": serialize_doc(users), "total": len(users)}
 
 @api_router.put("/users/{user_id}")
 async def update_user(
@@ -683,7 +683,7 @@ async def get_courses(
     if branch_id:
         courses = [c for c in courses if branch_id in c.get("branch_pricing", {})]
     
-    return {"courses": courses}
+    return {"courses": serialize_doc(courses)}
 
 @api_router.put("/courses/{course_id}")
 async def update_course(
@@ -789,7 +789,7 @@ async def get_enrollments(
         filter_query["branch_id"] = current_user["branch_id"]
     
     enrollments = await db.enrollments.find(filter_query).skip(skip).limit(limit).to_list(length=limit)
-    return {"enrollments": enrollments}
+    return {"enrollments": serialize_doc(enrollments)}
 
 @api_router.get("/students/{student_id}/courses")
 async def get_student_courses(
@@ -818,7 +818,7 @@ async def get_student_courses(
                 "course": course
             })
     
-    return {"enrolled_courses": result}
+    return {"enrolled_courses": serialize_doc(result)}
 
 # ATTENDANCE SYSTEM ENDPOINTS
 @api_router.post("/attendance/generate-qr")
@@ -962,7 +962,7 @@ async def get_attendance_reports(
         filter_query["branch_id"] = current_user["branch_id"]
     
     attendance_records = await db.attendance.find(filter_query).to_list(length=1000)
-    return {"attendance_records": attendance_records}
+    return {"attendance_records": serialize_doc(attendance_records)}
 
 # PAYMENT MANAGEMENT ENDPOINTS
 @api_router.post("/payments")
@@ -1022,7 +1022,7 @@ async def get_payments(
         filter_query["student_id"] = current_user["id"]
     
     payments = await db.payments.find(filter_query).skip(skip).limit(limit).to_list(length=limit)
-    return {"payments": payments}
+    return {"payments": serialize_doc(payments)}
 
 @api_router.get("/payments/dues")
 async def get_outstanding_dues(
@@ -1046,7 +1046,7 @@ async def get_outstanding_dues(
         dues_by_student[student_id]["total_amount"] += payment["amount"]
         dues_by_student[student_id]["payments"].append(payment)
     
-    return {"outstanding_dues": dues_by_student}
+    return {"outstanding_dues": serialize_doc(dues_by_student)}
 
 # PRODUCTS/ACCESSORIES MANAGEMENT
 @api_router.post("/products")
@@ -1077,7 +1077,7 @@ async def get_products(
     if branch_id:
         products = [p for p in products if branch_id in p.get("branch_availability", {})]
     
-    return {"products": products}
+    return {"products": serialize_doc(products)}
 
 @api_router.post("/products/purchase")
 async def purchase_product(
@@ -1154,7 +1154,7 @@ async def get_complaints(
         filter_query["student_id"] = current_user["id"]
     
     complaints = await db.complaints.find(filter_query).to_list(length=1000)
-    return {"complaints": complaints}
+    return {"complaints": serialize_doc(complaints)}
 
 @api_router.put("/complaints/{complaint_id}")
 async def update_complaint(
@@ -1238,7 +1238,7 @@ async def get_my_bookings(
 ):
     """Get student's session bookings"""
     bookings = await db.session_bookings.find({"student_id": current_user["id"]}).to_list(length=1000)
-    return {"bookings": bookings}
+    return {"bookings": serialize_doc(bookings)}
 
 # REPORTING & ANALYTICS ENDPOINTS
 @api_router.get("/reports/dashboard")

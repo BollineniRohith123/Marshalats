@@ -14,7 +14,7 @@ def test_auth_flow():
     # Test 1: Health check
     print("Testing health check...")
     try:
-        response = requests.get(base_url, timeout=10)
+        response = requests.get(base_url, timeout=30)
         print(f"Health check: {response.status_code}")
         print(f"Response: {response.text[:200]}")
     except Exception as e:
@@ -25,14 +25,14 @@ def test_auth_flow():
     timestamp = int(time.time())
     user_data = {
         "email": f"debugtest{timestamp}@edumanage.com",
-        "phone": f"+9198765432{timestamp % 100:02d}",
+        "phone": f"+91{timestamp}",
         "full_name": "Debug Test User",
         "role": "student",
         "password": "DebugTest123!"
     }
     
     try:
-        response = requests.post(f"{api_url}/auth/register", json=user_data, timeout=10)
+        response = requests.post(f"{api_url}/auth/register", json=user_data, timeout=30)
         print(f"Registration: {response.status_code}")
         print(f"Response: {response.text}")
         
@@ -44,7 +44,7 @@ def test_auth_flow():
                 "password": user_data["password"]
             }
             
-            login_response = requests.post(f"{api_url}/auth/login", json=login_data, timeout=10)
+            login_response = requests.post(f"{api_url}/auth/login", json=login_data, timeout=30)
             print(f"Login: {login_response.status_code}")
             print(f"Response: {login_response.text}")
             
@@ -52,19 +52,32 @@ def test_auth_flow():
                 token = login_response.json().get("access_token")
                 print(f"Token: {token[:50]}...")
                 
-                # Test 4: Get current user
-                print("\nTesting get current user...")
-                headers = {"Authorization": f"Bearer {token}"}
-                me_response = requests.get(f"{api_url}/auth/me", headers=headers, timeout=10)
-                print(f"Get me: {me_response.status_code}")
-                print(f"Response: {me_response.text}")
+                headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
                 
-                # Test 5: Get branches (to check 500 error)
-                print("\nTesting get branches...")
-                branches_response = requests.get(f"{api_url}/branches", headers=headers, timeout=10)
-                print(f"Get branches: {branches_response.status_code}")
-                print(f"Response: {branches_response.text}")
-                
+                # Test 4: Get courses
+                print("\nTesting get courses...")
+                courses_response = requests.get(f"{api_url}/courses", headers=headers, timeout=30)
+                print(f"Get courses: {courses_response.status_code}")
+                print(f"Response: {courses_response.text}")
+
+                # Test 5: Get products
+                print("\nTesting get products...")
+                products_response = requests.get(f"{api_url}/products", headers=headers, timeout=30)
+                print(f"Get products: {products_response.status_code}")
+                print(f"Response: {products_response.text}")
+
+                # Test 6: Create complaint
+                print("\nTesting create complaint...")
+                complaint_data = {
+                    "subject": "Facility Issue",
+                    "description": "The training hall needs better ventilation and lighting for evening sessions.",
+                    "category": "facilities",
+                    "priority": "medium"
+                }
+                complaint_response = requests.post(f"{api_url}/complaints", headers=headers, json=complaint_data, timeout=30)
+                print(f"Create complaint: {complaint_response.status_code}")
+                print(f"Response: {complaint_response.text}")
+
     except Exception as e:
         print(f"Request failed: {e}")
 

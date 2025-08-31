@@ -126,7 +126,7 @@ class StudentManagementAPITester:
             # Create unique test student
             student_data = {
                 "email": f"teststudent_{int(time.time())}@edumanage.com",
-                "phone": f"+9198765432{int(time.time()) % 100:02d}",
+                "phone": f"+91{int(time.time())}",
                 "full_name": "Test Student Registration",
                 "role": "student",
                 "password": "TestPass123!"
@@ -241,7 +241,7 @@ class StudentManagementAPITester:
         try:
             new_user_data = {
                 "email": f"newuser_{int(time.time())}@edumanage.com",
-                "phone": f"+9198765432{int(time.time()) % 100:02d}",
+                "phone": f"+91{int(time.time())}",
                 "full_name": "New Test User",
                 "role": "coach",
                 "password": "NewUser123!"
@@ -375,7 +375,7 @@ class StudentManagementAPITester:
             # First create a student for enrollment
             student_data = {
                 "email": f"enrollstudent_{int(time.time())}@edumanage.com",
-                "phone": f"+9198765432{int(time.time()) % 100:02d}",
+                "phone": f"+91{int(time.time())}",
                 "full_name": "Enrollment Test Student",
                 "role": "student",
                 "password": "EnrollTest123!"
@@ -466,7 +466,7 @@ class StudentManagementAPITester:
             # Create a new student and enroll them first
             student_data = {
                 "email": f"qrstudent_{int(time.time())}@edumanage.com",
-                "phone": f"+9198765432{int(time.time()) % 100:02d}",
+                "phone": f"+91{int(time.time())}",
                 "full_name": "QR Test Student",
                 "role": "student",
                 "password": "QRTest123!"
@@ -508,13 +508,9 @@ class StudentManagementAPITester:
                     return False
             
             # Generate a fresh QR code
-            qr_params = {
-                "course_id": self.test_data["course_id"],
-                "branch_id": self.test_data["branch_id"],
-                "valid_minutes": 30
-            }
+            endpoint = f"/attendance/generate-qr?course_id={self.test_data['course_id']}&branch_id={self.test_data['branch_id']}&valid_minutes=30"
             
-            qr_response = self.make_request("POST", "/attendance/generate-qr", qr_params, auth_token=self.tokens["super_admin"])
+            qr_response = self.make_request("POST", endpoint, {}, auth_token=self.tokens["super_admin"])
             if qr_response.status_code != 200:
                 self.log_result("QR Code Scanning", False, "Failed to generate QR code for scanning test")
                 return False
@@ -523,8 +519,8 @@ class StudentManagementAPITester:
             qr_code = f"attendance:{self.test_data['course_id']}:{self.test_data['branch_id']}:{int(time.time())}"
             
             # Now scan the QR code
-            scan_data = {"qr_code": qr_code}
-            response = self.make_request("POST", "/attendance/scan-qr", scan_data, auth_token=student_token)
+            endpoint = f"/attendance/scan-qr?qr_code={qr_code}"
+            response = self.make_request("POST", endpoint, auth_token=student_token)
             
             if response.status_code == 200:
                 data = response.json()
@@ -669,7 +665,7 @@ class StudentManagementAPITester:
             # First create a coach for the session
             coach_data = {
                 "email": f"coach_{int(time.time())}@edumanage.com",
-                "phone": f"+9198765432{int(time.time()) % 100:02d}",
+                "phone": f"+91{int(time.time())}",
                 "full_name": "Test Coach",
                 "role": "coach",
                 "password": "Coach123!",
