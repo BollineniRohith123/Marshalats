@@ -8,7 +8,7 @@ import json
 import time
 
 def test_auth_flow():
-    base_url = "https://edumanage-44.preview.emergentagent.com"
+    base_url = "https://edumanage-44.preview.dev.com"
     api_url = f"{base_url}/api"
     
     # Test 1: Health check

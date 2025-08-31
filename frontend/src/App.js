@@ -23,14 +23,9 @@ const Home = () => {
   return (
     <div>
       <header className="App-header">
-        <a
-          className="App-link"
-          href="https://emergent.sh"
-          target="_blank"
-          rel="noopener noreferrer"
-        >
+        <div>
           <img src="https://avatars.githubusercontent.com/in/1201222?s=120&u=2686cf91179bbafbc7a71bfbc43004cf9ae1acea&v=4" />
-        </a>
+        </div>
         <p className="mt-5">Building something incredible ~!</p>
       </header>
     </div>

@@ -5,7 +5,7 @@ This is a comprehensive Student Management System API built with FastAPI, suppor
 
 ## Base URL
 ```
-Production: https://edumanage-44.preview.emergentagent.com/api
+Production: https://edumanage-44.preview.dev.com/api
 Development: http://localhost:8001/api
 ```
 
