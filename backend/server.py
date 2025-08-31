@@ -26,12 +26,23 @@ ROOT_DIR = Path(__file__).parent
 load_dotenv(ROOT_DIR / '.env')
 
 # MongoDB connection
-mongo_url = os.environ.get('MONGO_URL', 'mongodb://localhost:27017')
-client = AsyncIOMotorClient(mongo_url)
-db = client[os.environ.get('DB_NAME', 'student_management_db')]
+db = None
+
+from contextlib import asynccontextmanager
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    global db
+    mongo_url = os.environ.get('MONGO_URL', 'mongodb://localhost:27017')
+    client = AsyncIOMotorClient(mongo_url)
+    db = client[os.environ.get('DB_NAME', 'student_management_db')]
+    print("Database connection opened.")
+    yield
+    client.close()
+    print("Database connection closed.")
 
 # Create FastAPI app
-app = FastAPI(title="Student Management System", version="1.0.0")
+app = FastAPI(title="Student Management System", version="1.0.0", lifespan=lifespan)
 api_router = APIRouter(prefix="/api")
 
 # Security setup
@@ -94,6 +105,13 @@ class UserCreate(BaseModel):
 class UserLogin(BaseModel):
     email: EmailStr
     password: str
+
+class ForgotPassword(BaseModel):
+    email: EmailStr
+
+class ResetPassword(BaseModel):
+    token: str
+    new_password: str
 
 class UserUpdate(BaseModel):
     email: Optional[EmailStr] = None
@@ -273,6 +291,15 @@ class ProductCreate(BaseModel):
     price: float
     branch_availability: Optional[Dict[str, int]] = {}
     image_url: Optional[str] = None
+
+class ProductUpdate(BaseModel):
+    name: Optional[str] = None
+    description: Optional[str] = None
+    category: Optional[str] = None
+    price: Optional[float] = None
+    branch_availability: Optional[Dict[str, int]] = None
+    image_url: Optional[str] = None
+    is_active: Optional[bool] = None
 
 class ProductPurchase(BaseModel):
     id: str = Field(default_factory=lambda: str(uuid.uuid4()))
@@ -495,6 +522,61 @@ async def login(user_credentials: UserLogin):
         "full_name": user["full_name"]
     }}
 
+@api_router.post("/auth/forgot-password")
+async def forgot_password(forgot_password_data: ForgotPassword):
+    """Initiate password reset process"""
+    user = await db.users.find_one({"email": forgot_password_data.email})
+    if not user:
+        # Don't reveal that the user does not exist
+        return {"message": "If an account with that email exists, a password reset link has been sent."}
+
+    # Generate a short-lived token for password reset
+    reset_token = create_access_token(
+        data={"sub": user["id"], "scope": "password_reset"},
+        expires_delta=timedelta(minutes=15)
+    )
+
+    # In a real application, you would email this token to the user
+    # For this example, we'll just log it.
+    logging.info(f"Password reset token for {user['email']}: {reset_token}")
+
+    await send_sms(user["phone"], f"Your password reset token is: {reset_token}")
+
+    response = {"message": "If an account with that email exists, a password reset link has been sent."}
+    if os.environ.get("TESTING") == "True":
+        response["reset_token"] = reset_token
+    return response
+
+@api_router.post("/auth/reset-password")
+async def reset_password(reset_password_data: ResetPassword):
+    """Reset password using a token"""
+    try:
+        payload = jwt.decode(
+            reset_password_data.token,
+            SECRET_KEY,
+            algorithms=[ALGORITHM]
+        )
+        if payload.get("scope") != "password_reset":
+            raise HTTPException(status_code=401, detail="Invalid token scope")
+
+        user_id = payload.get("sub")
+        if not user_id:
+            raise HTTPException(status_code=401, detail="Invalid token")
+
+    except jwt.PyJWTError:
+        raise HTTPException(status_code=401, detail="Invalid or expired token")
+
+    new_hashed_password = hash_password(reset_password_data.new_password)
+    result = await db.users.update_one(
+        {"id": user_id},
+        {"$set": {"password": new_hashed_password, "updated_at": datetime.utcnow()}}
+    )
+
+    if result.matched_count == 0:
+        raise HTTPException(status_code=404, detail="User not found")
+
+    return {"message": "Password has been reset successfully."}
+
 @api_router.get("/auth/me")
 async def get_current_user_info(current_user: dict = Depends(get_current_active_user)):
     """Get current user information"""
@@ -521,9 +603,17 @@ async def update_profile(
 @api_router.post("/users")
 async def create_user(
     user_data: UserCreate,
-    current_user: dict = Depends(require_role([UserRole.SUPER_ADMIN]))
+    current_user: dict = Depends(require_role([UserRole.SUPER_ADMIN, UserRole.COACH_ADMIN]))
 ):
-    """Create new user (Super Admin only)"""
+    """Create new user (Super Admin or Coach Admin)"""
+    # If a coach admin is creating a user, they must be in the same branch
+    if current_user["role"] == UserRole.COACH_ADMIN:
+        if not current_user.get("branch_id") or user_data.branch_id != current_user["branch_id"]:
+            raise HTTPException(status_code=403, detail="Coach Admins can only create users for their own branch.")
+        # Coach admins cannot create other admins
+        if user_data.role in [UserRole.SUPER_ADMIN, UserRole.COACH_ADMIN]:
+            raise HTTPException(status_code=403, detail="Coach Admins cannot create other admin users.")
+
     # Check if user exists
     existing_user = await db.users.find_one({
         "$or": [{"email": user_data.email}, {"phone": user_data.phone}]
@@ -572,10 +662,24 @@ async def get_users(
 async def update_user(
     user_id: str,
     user_update: UserUpdate,
-    current_user: dict = Depends(require_role([UserRole.SUPER_ADMIN]))
+    current_user: dict = Depends(require_role([UserRole.SUPER_ADMIN, UserRole.COACH_ADMIN]))
 ):
-    """Update user (Super Admin only)"""
-    update_data = {k: v for k, v in user_update.dict().items() if v is not None}
+    """Update user (Super Admin or Coach Admin)"""
+    target_user = await db.users.find_one({"id": user_id})
+    if not target_user:
+        raise HTTPException(status_code=404, detail="User not found")
+
+    if current_user["role"] == UserRole.COACH_ADMIN:
+        # Coach Admins can only update students in their own branch
+        if target_user["role"] != UserRole.STUDENT.value:
+            raise HTTPException(status_code=403, detail="Coach Admins can only update student profiles.")
+        if target_user.get("branch_id") != current_user.get("branch_id"):
+            raise HTTPException(status_code=403, detail="Coach Admins can only update students in their own branch.")
+
+    update_data = {k: v for k, v in user_update.dict(exclude_unset=True).items()}
+    if not update_data:
+        raise HTTPException(status_code=400, detail="No update data provided")
+
     update_data["updated_at"] = datetime.utcnow()
     
     result = await db.users.update_one(
@@ -584,9 +688,98 @@ async def update_user(
     )
     
     if result.matched_count == 0:
+        # This case should be rare due to the check above, but it's good practice
         raise HTTPException(status_code=404, detail="User not found")
     
     return {"message": "User updated successfully"}
+
+# TRANSFER REQUESTS
+class TransferRequestStatus(str, Enum):
+    PENDING = "pending"
+    APPROVED = "approved"
+    REJECTED = "rejected"
+
+class TransferRequest(BaseModel):
+    id: str = Field(default_factory=lambda: str(uuid.uuid4()))
+    student_id: str
+    current_branch_id: str
+    new_branch_id: str
+    reason: str
+    status: TransferRequestStatus = TransferRequestStatus.PENDING
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+    updated_at: datetime = Field(default_factory=datetime.utcnow)
+
+class TransferRequestCreate(BaseModel):
+    new_branch_id: str
+    reason: str
+
+class TransferRequestUpdate(BaseModel):
+    status: TransferRequestStatus
+
+@api_router.post("/requests/transfer", status_code=status.HTTP_201_CREATED)
+async def create_transfer_request(
+    request_data: TransferRequestCreate,
+    current_user: dict = Depends(require_role([UserRole.STUDENT]))
+):
+    """Create a new transfer request."""
+    if not current_user.get("branch_id"):
+        raise HTTPException(status_code=400, detail="User is not currently assigned to a branch.")
+
+    transfer_request = TransferRequest(
+        student_id=current_user["id"],
+        current_branch_id=current_user["branch_id"],
+        **request_data.dict()
+    )
+    await db.transfer_requests.insert_one(transfer_request.dict())
+    return transfer_request
+
+@api_router.get("/requests/transfer")
+async def get_transfer_requests(
+    status: Optional[TransferRequestStatus] = None,
+    current_user: dict = Depends(require_role([UserRole.SUPER_ADMIN, UserRole.COACH_ADMIN]))
+):
+    """Get a list of transfer requests."""
+    filter_query = {}
+    if status:
+        filter_query["status"] = status.value
+
+    if current_user["role"] == UserRole.COACH_ADMIN:
+        # Coach admins can only see requests for their branch
+        filter_query["current_branch_id"] = current_user.get("branch_id")
+
+    requests = await db.transfer_requests.find(filter_query).to_list(1000)
+    return {"requests": serialize_doc(requests)}
+
+@api_router.put("/requests/transfer/{request_id}")
+async def update_transfer_request(
+    request_id: str,
+    update_data: TransferRequestUpdate,
+    current_user: dict = Depends(require_role([UserRole.SUPER_ADMIN, UserRole.COACH_ADMIN]))
+):
+    """Update a transfer request (approve/reject)."""
+    transfer_request = await db.transfer_requests.find_one({"id": request_id})
+    if not transfer_request:
+        raise HTTPException(status_code=404, detail="Transfer request not found")
+
+    if current_user["role"] == UserRole.COACH_ADMIN:
+        if transfer_request["current_branch_id"] != current_user.get("branch_id"):
+            raise HTTPException(status_code=403, detail="You can only manage requests for your own branch.")
+
+    updated_request = await db.transfer_requests.find_one_and_update(
+        {"id": request_id},
+        {"$set": {"status": update_data.status, "updated_at": datetime.utcnow()}},
+        return_document=True
+    )
+
+    # If approved, update the student's branch
+    if update_data.status == TransferRequestStatus.APPROVED:
+        await db.users.update_one(
+            {"id": transfer_request["student_id"]},
+            {"$set": {"branch_id": transfer_request["new_branch_id"]}}
+        )
+
+    return {"message": "Transfer request updated successfully.", "request": serialize_doc(updated_request)}
+
 
 @api_router.delete("/users/{user_id}")
 async def deactivate_user(
@@ -1079,6 +1272,52 @@ async def get_products(
     
     return {"products": serialize_doc(products)}
 
+@api_router.put("/products/{product_id}")
+async def update_product(
+    product_id: str,
+    product_update: ProductUpdate,
+    current_user: dict = Depends(require_role([UserRole.SUPER_ADMIN]))
+):
+    """Update product details (Super Admin only)"""
+    update_data = {k: v for k, v in product_update.dict(exclude_unset=True).items()}
+    if not update_data:
+        raise HTTPException(status_code=400, detail="No update data provided")
+
+    update_data["updated_at"] = datetime.utcnow()
+
+    result = await db.products.update_one(
+        {"id": product_id},
+        {"$set": update_data}
+    )
+
+    if result.matched_count == 0:
+        raise HTTPException(status_code=404, detail="Product not found")
+
+    return {"message": "Product updated successfully"}
+
+@api_router.get("/products/purchases")
+async def get_product_purchases(
+    student_id: Optional[str] = None,
+    branch_id: Optional[str] = None,
+    skip: int = 0,
+    limit: int = 50,
+    current_user: dict = Depends(get_current_active_user)
+):
+    """Get product purchases with filtering"""
+    filter_query = {}
+    if student_id:
+        filter_query["student_id"] = student_id
+    if branch_id:
+        filter_query["branch_id"] = branch_id
+
+    if current_user["role"] == UserRole.STUDENT:
+        filter_query["student_id"] = current_user["id"]
+    elif current_user["role"] == UserRole.COACH_ADMIN:
+        filter_query["branch_id"] = current_user.get("branch_id")
+
+    purchases = await db.product_purchases.find(filter_query).skip(skip).limit(limit).to_list(length=limit)
+    return {"purchases": serialize_doc(purchases)}
+
 @api_router.post("/products/purchase")
 async def purchase_product(
     purchase_data: ProductPurchaseCreate,
@@ -1122,7 +1361,7 @@ async def create_complaint(
     complaint = Complaint(
         **complaint_data.dict(),
         student_id=current_user["id"],
-        branch_id=current_user.get("branch_id", "")
+        branch_id=current_user.get("branch_id") or ""
     )
     
     await db.complaints.insert_one(complaint.dict())
@@ -1310,7 +1549,3 @@ app.include_router(api_router)
 @app.get("/")
 async def health_check():
     return {"status": "OK", "message": "Student Management System API", "version": "1.0.0"}
-
-@app.on_event("shutdown")
-async def shutdown_db_client():
-    client.close()
