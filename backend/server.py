@@ -1124,6 +1124,155 @@ async def get_student_courses(
     
     return {"enrolled_courses": serialize_doc(result)}
 
+class StudentEnrollmentCreate(BaseModel):
+    course_id: str
+    branch_id: str
+    start_date: datetime
+    # admission_fee and fee_amount will be derived from the course and branch pricing
+
+@api_router.post("/students/enroll", status_code=status.HTTP_201_CREATED)
+async def student_enroll_in_course(
+    enrollment_data: StudentEnrollmentCreate,
+    current_user: dict = Depends(require_role([UserRole.STUDENT]))
+):
+    """Allow a student to enroll themselves in a course."""
+    student_id = current_user["id"]
+
+    # Validate student, course, and branch exist
+    student = await db.users.find_one({"id": student_id, "role": "student"})
+    if not student:
+        raise HTTPException(status_code=404, detail="Student not found")
+
+    course = await db.courses.find_one({"id": enrollment_data.course_id})
+    if not course:
+        raise HTTPException(status_code=404, detail="Course not found")
+
+    branch = await db.branches.find_one({"id": enrollment_data.branch_id})
+    if not branch:
+        raise HTTPException(status_code=404, detail="Branch not found")
+
+    # Check if student is already enrolled in this course
+    existing_enrollment = await db.enrollments.find_one({
+        "student_id": student_id,
+        "course_id": enrollment_data.course_id,
+        "is_active": True
+    })
+    if existing_enrollment:
+        raise HTTPException(status_code=400, detail="Student already enrolled in this course.")
+
+    # Determine fee_amount based on branch pricing
+    admission_fee = 500.0 # Fixed admission fee
+    fee_amount = course["base_fee"]
+    if enrollment_data.branch_id in course.get("branch_pricing", {}):
+        fee_amount = course["branch_pricing"][enrollment_data.branch_id]
+
+    # Calculate end date
+    end_date = enrollment_data.start_date + timedelta(days=course["duration_months"] * 30)
+
+    enrollment = Enrollment(
+        student_id=student_id,
+        course_id=enrollment_data.course_id,
+        branch_id=enrollment_data.branch_id,
+        start_date=enrollment_data.start_date,
+        end_date=end_date,
+        fee_amount=fee_amount,
+        admission_fee=admission_fee,
+        next_due_date=enrollment_data.start_date + timedelta(days=30)
+    )
+
+    await db.enrollments.insert_one(enrollment.dict())
+
+    # Create initial payment records (pending)
+    admission_payment = Payment(
+        student_id=student_id,
+        enrollment_id=enrollment.id,
+        amount=admission_fee,
+        payment_type="admission_fee",
+        payment_method="pending",
+        payment_status=PaymentStatus.PENDING,
+        due_date=datetime.utcnow() + timedelta(days=7)
+    )
+
+    course_payment = Payment(
+        student_id=student_id,
+        enrollment_id=enrollment.id,
+        amount=fee_amount,
+        payment_type="course_fee",
+        payment_method="pending",
+        payment_status=PaymentStatus.PENDING,
+        due_date=enrollment_data.start_date
+    )
+
+    await db.payments.insert_many([admission_payment.dict(), course_payment.dict()])
+
+    # Send enrollment confirmation
+    await send_whatsapp(student["phone"], f"Welcome! You're enrolled in {course['name']}. Start date: {enrollment_data.start_date.date()}")
+
+    return {"message": "Enrollment created successfully", "enrollment_id": enrollment.id}
+
+class StudentPaymentCreate(BaseModel):
+    enrollment_id: str
+    amount: float
+    payment_method: str # e.g., "online", "upi", "card"
+    transaction_id: Optional[str] = None
+    notes: Optional[str] = None
+
+@api_router.post("/students/payments", status_code=status.HTTP_201_CREATED)
+async def student_process_payment(
+    payment_data: StudentPaymentCreate,
+    current_user: dict = Depends(require_role([UserRole.STUDENT]))
+):
+    """Allow a student to process a payment for their enrollment."""
+    student_id = current_user["id"]
+
+    # Validate enrollment and payment
+    enrollment = await db.enrollments.find_one({"id": payment_data.enrollment_id, "student_id": student_id})
+    if not enrollment:
+        raise HTTPException(status_code=404, detail="Enrollment not found or does not belong to you.")
+
+    # Find the pending payment for this enrollment
+    # This assumes there's a specific pending payment the student is trying to clear
+    # In a real system, you might have a more complex payment reconciliation logic
+    pending_payment = await db.payments.find_one({
+        "enrollment_id": payment_data.enrollment_id,
+        "student_id": student_id,
+        "payment_status": PaymentStatus.PENDING.value,
+        "amount": payment_data.amount # Ensure the amount matches
+    })
+
+    if not pending_payment:
+        raise HTTPException(status_code=400, detail="No matching pending payment found for this enrollment and amount.")
+
+    # Simulate payment gateway interaction (update payment status)
+    update_data = {
+        "payment_status": PaymentStatus.PAID,
+        "payment_method": payment_data.payment_method,
+        "transaction_id": payment_data.transaction_id,
+        "payment_date": datetime.utcnow(),
+        "notes": payment_data.notes,
+        "updated_at": datetime.utcnow()
+    }
+
+    result = await db.payments.update_one(
+        {"id": pending_payment["id"]},
+        {"$set": update_data}
+    )
+
+    if result.matched_count == 0:
+        raise HTTPException(status_code=500, detail="Failed to update payment status.")
+
+    # Update enrollment payment status if needed (e.g., if all payments are cleared)
+    # This logic might need to be more sophisticated in a real app
+    await db.enrollments.update_one(
+        {"id": enrollment["id"]},
+        {"$set": {"payment_status": PaymentStatus.PAID}} # Simplified: mark enrollment paid if this payment clears it
+    )
+
+    # Send payment confirmation
+    await send_whatsapp(current_user["phone"], f"Payment of ₹{payment_data.amount} received for enrollment {payment_data.enrollment_id}. Thank you!")
+
+    return {"message": "Payment processed successfully", "payment_id": pending_payment["id"]}
+
 # ATTENDANCE SYSTEM ENDPOINTS
 @api_router.post("/attendance/generate-qr")
 async def generate_attendance_qr(
@@ -1505,6 +1654,75 @@ async def purchase_product(
     )
     
     return {"message": "Purchase recorded successfully", "purchase_id": purchase.id, "total_amount": purchase.total_amount}
+
+class StudentProductPurchaseCreate(BaseModel):
+    product_id: str
+    quantity: int
+    payment_method: str # e.g., "online", "upi", "card"
+
+@api_router.post("/students/products/purchase", status_code=status.HTTP_201_CREATED)
+async def student_purchase_product(
+    purchase_data: StudentProductPurchaseCreate,
+    current_user: dict = Depends(require_role([UserRole.STUDENT]))
+):
+    """Allow a student to purchase a product online."""
+    student_id = current_user["id"]
+    branch_id = current_user.get("branch_id")
+
+    if not branch_id:
+        raise HTTPException(status_code=400, detail="Student is not assigned to a branch.")
+
+    # Validate product and stock
+    product = await db.products.find_one({"id": purchase_data.product_id})
+    if not product:
+        raise HTTPException(status_code=404, detail="Product not found.")
+
+    branch_stock = product.get("branch_availability", {}).get(branch_id, 0)
+    if branch_stock < purchase_data.quantity:
+        raise HTTPException(status_code=400, detail="Insufficient stock at your branch.")
+
+    # Calculate total amount
+    unit_price = product["price"]
+    total_amount = unit_price * purchase_data.quantity
+
+    # Create ProductPurchase record
+    purchase = ProductPurchase(
+        student_id=student_id,
+        product_id=purchase_data.product_id,
+        branch_id=branch_id,
+        quantity=purchase_data.quantity,
+        unit_price=unit_price,
+        total_amount=total_amount,
+        payment_method=purchase_data.payment_method,
+        purchase_date=datetime.utcnow()
+    )
+    await db.product_purchases.insert_one(purchase.dict())
+
+    # Update stock
+    new_stock = branch_stock - purchase_data.quantity
+    await db.products.update_one(
+        {"id": purchase_data.product_id},
+        {"$set": {f"branch_availability.{branch_id}": new_stock}}
+    )
+
+    # Create Payment record for the purchase
+    payment = Payment(
+        student_id=student_id,
+        enrollment_id="", # No enrollment for product purchases
+        amount=total_amount,
+        payment_type="accessory_purchase",
+        payment_method=purchase_data.payment_method,
+        payment_status=PaymentStatus.PAID, # Assuming online payment is immediately paid
+        transaction_id=str(uuid.uuid4()), # Generate a dummy transaction ID
+        due_date=datetime.utcnow(),
+        notes=f"Online purchase of {purchase_data.quantity} x {product['name']}"
+    )
+    await db.payments.insert_one(payment.dict())
+
+    # Send confirmation
+    await send_whatsapp(current_user["phone"], f"Thank you for your purchase of {purchase_data.quantity} x {product['name']} for ₹{total_amount}. Your order is confirmed!")
+
+    return {"message": "Product purchased successfully", "purchase_id": purchase.id, "total_amount": total_amount}
 
 # COMPLAINTS & FEEDBACK SYSTEM
 @api_router.post("/complaints")

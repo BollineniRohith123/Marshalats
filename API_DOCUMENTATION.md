@@ -290,6 +290,25 @@ Authorization: Bearer <your_jwt_token>
 **Description**: Get student's enrolled courses
 **Access**: Student (own data), Admins
 
+### POST /api/students/enroll
+**Description**: Allow a student to enroll themselves in a course.
+**Access**: Student
+**Request Body**:
+```json
+{
+  "course_id": "course-uuid",
+  "branch_id": "branch-uuid",
+  "start_date": "2025-02-01T00:00:00Z"
+}
+```
+**Response**:
+```json
+{
+  "message": "Enrollment created successfully",
+  "enrollment_id": "enrollment-uuid"
+}
+```
+
 ---
 
 ## 6. Attendance System
@@ -383,6 +402,27 @@ Authorization: Bearer <your_jwt_token>
 **Description**: Get outstanding dues
 **Access**: Based on role
 
+### POST /api/students/payments
+**Description**: Allow a student to process a payment for their enrollment.
+**Access**: Student
+**Request Body**:
+```json
+{
+  "enrollment_id": "enrollment-uuid",
+  "amount": 1200.0,
+  "payment_method": "online",
+  "transaction_id": "TXN123456789",
+  "notes": "Online payment for course fee"
+}
+```
+**Response**:
+```json
+{
+  "message": "Payment processed successfully",
+  "payment_id": "payment-uuid"
+}
+```
+
 ---
 
 ## 8. Products/Accessories Management
@@ -443,6 +483,26 @@ Authorization: Bearer <your_jwt_token>
 **Query Parameters**:
 - `student_id`: Filter by student (Admin only)
 - `branch_id`: Filter by branch (Admin only)
+
+### POST /api/students/products/purchase
+**Description**: Allow a student to purchase a product online.
+**Access**: Student
+**Request Body**:
+```json
+{
+  "product_id": "product-uuid",
+  "quantity": 1,
+  "payment_method": "online"
+}
+```
+**Response**:
+```json
+{
+  "message": "Product purchased successfully",
+  "purchase_id": "purchase-uuid",
+  "total_amount": 250.0
+}
+```
 
 ---
 
@@ -610,15 +670,7 @@ Authorization: Bearer <your_jwt_token>
 **Description**: Submit proof of payment for an offline transaction.
 **Access**: Student
 
----
 
-## 15. Coach Ratings
-
-### GET /api/coaches/{coach_id}/ratings
-**Description**: Get all ratings for a specific coach.
-**Access**: All authenticated users
-
----
 
 ## Response Codes
 
