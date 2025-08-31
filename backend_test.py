@@ -4,7 +4,7 @@ from backend.server import app, db
 import pymongo
 from datetime import datetime
 
-@pytest.fixture(scope="module", autouse=True)
+@pytest.fixture(scope="function", autouse=True)
 def setup_database():
     """
     Fixture to clean up the database before and after tests.
@@ -138,16 +138,16 @@ def test_product_management():
         create_response = client.post("/api/products", json=product_data, headers={"Authorization": f"Bearer {admin_token}"})
         assert create_response.status_code == 200
         product_id = create_response.json()["product_id"]
-        
+
         # Update the product
         update_data = {"price": 1600.0, "description": "High-quality white karate gi with belt"}
         update_response = client.put(f"/api/products/{product_id}", json=update_data, headers={"Authorization": f"Bearer {admin_token}"})
         assert update_response.status_code == 200
-        
+
         # Get the product again to verify the update
         get_response = client.get("/api/products", headers={"Authorization": f"Bearer {admin_token}"})
         assert get_response.status_code == 200
-        
+
         products = get_response.json()["products"]
         assert len(products) == 1
         assert products[0]["name"] == "Karate Uniform"
@@ -302,13 +302,13 @@ def test_qr_code_scanning():
 
         # The qr_code to be scanned is not returned by the generate-qr endpoint in this implementation.
         # The test needs to find it from the database.
-        
+
         # To do this, I need to query the database.
         mongo_client = pymongo.MongoClient("mongodb://localhost:27017")
         db = mongo_client["student_management_db"]
         qr_session = db.qr_sessions.find_one({"id": qr_code_id})
         mongo_client.close()
-        
+
         assert qr_session is not None
         qr_code_to_scan = qr_session["qr_code"]
 
@@ -332,7 +332,7 @@ def test_view_purchase_history():
         student_user_data = {"email": "purchasestudent@edumanage.com", "password": "Student123!", "full_name": "Purchase Student", "phone": "+919876543217", "role": "student", "branch_id": branch_id}
         reg_response = client.post("/api/auth/register", json=student_user_data)
         student_id = reg_response.json()["user_id"]
-        
+
         # Login as the new student to get their token
         login_response = client.post("/api/auth/login", json={
             "email": student_user_data["email"],
@@ -382,7 +382,7 @@ def test_password_reset():
         new_password = "NewPassword123!"
         reset_response = client.post("/api/auth/reset-password", json={"token": reset_token, "new_password": new_password})
         assert reset_response.status_code == 200
-        
+
         # 3. Login with new password
         login_response = client.post("/api/auth/login", json={"email": user_email, "password": new_password})
         assert login_response.status_code == 200
@@ -471,6 +471,90 @@ def test_coach_admin_student_update():
         fail_admin_response = client.put(f"/api/users/{super_admin_id}", json=update_data, headers={"Authorization": f"Bearer {coach_admin_token}"})
         assert fail_admin_response.status_code == 403
 
+def test_financial_report():
+    """Test the financial report endpoint."""
+    with TestClient(app) as client:
+        admin_token = get_token(client, "super_admin")
+
+        # Setup: Create a branch and a course
+        branch_data = {"name": "Finance Branch", "address": "123 Finance St", "city": "Financeville", "state": "FS", "pincode": "54321", "phone": "+1234567891", "email": "finance@test.com"}
+        branch_response = client.post("/api/branches", json=branch_data, headers={"Authorization": f"Bearer {admin_token}"})
+        branch_id = branch_response.json()["branch_id"]
+        course_data = {"name": "Finance Course", "description": "A test course", "duration_months": 1, "base_fee": 1000.0}
+        course_response = client.post("/api/courses", json=course_data, headers={"Authorization": f"Bearer {admin_token}"})
+        course_id = course_response.json()["course_id"]
+
+        # Enrollment 1: Student pays course fee, admission fee is pending
+        s1_data = {"email": "s1.finance@test.com", "password": "p", "full_name": "s1", "phone": "1", "role": "student", "branch_id": branch_id}
+        s1_id = client.post("/api/auth/register", json=s1_data).json()["user_id"]
+        e1_data = {"student_id": s1_id, "course_id": course_id, "branch_id": branch_id, "start_date": datetime.now().isoformat(), "fee_amount": 1000.0, "admission_fee": 500.0}
+        e1_id = client.post("/api/enrollments", json=e1_data, headers={"Authorization": f"Bearer {admin_token}"}).json()["enrollment_id"]
+
+        payments = client.get(f"/api/payments?enrollment_id={e1_id}", headers={"Authorization": f"Bearer {admin_token}"}).json()["payments"]
+        course_fee_payment = next(p for p in payments if p["payment_type"] == "course_fee")
+        client.put(f"/api/payments/{course_fee_payment['id']}", json={"payment_status": "paid", "transaction_id": "T1"}, headers={"Authorization": f"Bearer {admin_token}"})
+
+        # Enrollment 2: All fees pending
+        s2_data = {"email": "s2.finance@test.com", "password": "p", "full_name": "s2", "phone": "2", "role": "student", "branch_id": branch_id}
+        s2_id = client.post("/api/auth/register", json=s2_data).json()["user_id"]
+        client.post("/api/enrollments", json={"student_id": s2_id, "course_id": course_id, "branch_id": branch_id, "start_date": datetime.now().isoformat(), "fee_amount": 1000.0, "admission_fee": 500.0}, headers={"Authorization": f"Bearer {admin_token}"})
+
+        # Get financial report
+        report_response = client.get("/api/reports/financial", headers={"Authorization": f"Bearer {admin_token}"})
+        assert report_response.status_code == 200
+        report = report_response.json()
+
+        assert report["total_collected"] == 1000.0
+        assert report["outstanding_dues"] == 2000.0
+
+def test_branch_report():
+    """Test the branch-specific report endpoint."""
+    with TestClient(app) as client:
+        # Setup
+        super_admin_token = get_token(client, "super_admin")
+        branch1_data = {"name": "Reporting Branch 1", "address": "1 Report St", "city": "Reportville", "state": "RS", "pincode": "11122", "phone": "+1112223333", "email": "report1@test.com"}
+        b1_res = client.post("/api/branches", json=branch1_data, headers={"Authorization": f"Bearer {super_admin_token}"})
+        branch1_id = b1_res.json()["branch_id"]
+
+        course_data = {"name": "Reporting Course", "description": "A test course", "duration_months": 1, "base_fee": 100}
+        c_res = client.post("/api/courses", json=course_data, headers={"Authorization": f"Bearer {super_admin_token}"})
+        course_id = c_res.json()["course_id"]
+
+        s1_data = {"email": "s1.report@test.com", "password": "p", "full_name": "s1", "phone": "1", "role": "student", "branch_id": branch1_id}
+        s1_id = client.post("/api/auth/register", json=s1_data).json()["user_id"]
+        client.post("/api/enrollments", json={"student_id": s1_id, "course_id": course_id, "branch_id": branch1_id, "start_date": datetime.now().isoformat(), "fee_amount": 100.0}, headers={"Authorization": f"Bearer {super_admin_token}"})
+
+        # 1. Test: Super admin can get the report
+        report1_res = client.get(f"/api/reports/branch/{branch1_id}", headers={"Authorization": f"Bearer {super_admin_token}"})
+        assert report1_res.status_code == 200
+        report1 = report1_res.json()
+        assert report1["total_students"] == 1
+        assert report1["active_enrollments"] == 1
+
+        # 2. Test: Coach admin for the branch can get the report
+        ca1_email = "ca1.report@test.com"
+        ca1_pass = "p"
+        ca1_data = {"email": ca1_email, "password": ca1_pass, "full_name": "CA1", "phone": "ca1", "role": "coach_admin", "branch_id": branch1_id}
+        client.post("/api/users", json=ca1_data, headers={"Authorization": f"Bearer {super_admin_token}"})
+        ca1_token = client.post("/api/auth/login", json={"email": ca1_email, "password": ca1_pass}).json()["access_token"]
+
+        ca1_report_res = client.get(f"/api/reports/branch/{branch1_id}", headers={"Authorization": f"Bearer {ca1_token}"})
+        assert ca1_report_res.status_code == 200
+
+        # 3. Test: Coach admin for another branch cannot get the report
+        branch2_data = {"name": "Reporting Branch 2", "address": "2 Report St", "city": "Reportville", "state": "RS", "pincode": "33344", "phone": "+4445556666", "email": "report2@test.com"}
+        b2_res = client.post("/api/branches", json=branch2_data, headers={"Authorization": f"Bearer {super_admin_token}"})
+        branch2_id = b2_res.json()["branch_id"]
+
+        ca2_email = "ca2.report@test.com"
+        ca2_pass = "p"
+        ca2_data = {"email": ca2_email, "password": ca2_pass, "full_name": "CA2", "phone": "ca2", "role": "coach_admin", "branch_id": branch2_id}
+        client.post("/api/users", json=ca2_data, headers={"Authorization": f"Bearer {super_admin_token}"})
+        ca2_token = client.post("/api/auth/login", json={"email": ca2_email, "password": ca2_pass}).json()["access_token"]
+
+        ca2_report_res = client.get(f"/api/reports/branch/{branch1_id}", headers={"Authorization": f"Bearer {ca2_token}"})
+        assert ca2_report_res.status_code == 403
+
 def test_student_transfer_request():
     """Test the student transfer request flow."""
     with TestClient(app) as client:
@@ -516,3 +600,69 @@ def test_student_transfer_request():
         me_response = client.get("/api/auth/me", headers={"Authorization": f"Bearer {student_token}"})
         updated_student_data = me_response.json()
         assert updated_student_data["branch_id"] == branch2_id
+
+def test_course_stats():
+    """Test the course statistics endpoint."""
+    with TestClient(app) as client:
+        # Setup
+        admin_token = get_token(client, "super_admin")
+        branch_data = {"name": "Stats Branch", "address": "123 Stats St", "city": "Statsville", "state": "SS", "pincode": "55555", "phone": "+5555555555", "email": "stats@test.com"}
+        branch_response = client.post("/api/branches", json=branch_data, headers={"Authorization": f"Bearer {admin_token}"})
+        branch_id = branch_response.json()["branch_id"]
+
+        course_data = {"name": "Stats Course", "description": "A test course", "duration_months": 1, "base_fee": 100}
+        course_response = client.post("/api/courses", json=course_data, headers={"Authorization": f"Bearer {admin_token}"})
+        course_id = course_response.json()["course_id"]
+
+        # Enroll two students
+        s1_data = {"email": "s1.stats@test.com", "password": "p", "full_name": "s1", "phone": "1", "role": "student", "branch_id": branch_id}
+        s1_id = client.post("/api/auth/register", json=s1_data).json()["user_id"]
+        client.post("/api/enrollments", json={"student_id": s1_id, "course_id": course_id, "branch_id": branch_id, "start_date": datetime.now().isoformat(), "fee_amount": 100.0}, headers={"Authorization": f"Bearer {admin_token}"})
+
+        s2_data = {"email": "s2.stats@test.com", "password": "p", "full_name": "s2", "phone": "2", "role": "student", "branch_id": branch_id}
+        s2_id = client.post("/api/auth/register", json=s2_data).json()["user_id"]
+        client.post("/api/enrollments", json={"student_id": s2_id, "course_id": course_id, "branch_id": branch_id, "start_date": datetime.now().isoformat(), "fee_amount": 100.0}, headers={"Authorization": f"Bearer {admin_token}"})
+
+        # Get course stats
+        stats_response = client.get(f"/api/courses/{course_id}/stats", headers={"Authorization": f"Bearer {admin_token}"})
+        assert stats_response.status_code == 200
+        stats = stats_response.json()
+
+        assert stats["active_enrollments"] == 2
+
+def test_overdue_payment_restriction():
+    """Test access restriction for students with overdue payments."""
+    with TestClient(app) as client:
+        # Setup
+        admin_token = get_token(client, "super_admin")
+        branch_data = {"name": "Restriction Branch", "address": "123 Restriction St", "city": "Restrictionville", "state": "RS", "pincode": "66666", "phone": "+6666666666", "email": "restriction@test.com"}
+        branch_response = client.post("/api/branches", json=branch_data, headers={"Authorization": f"Bearer {admin_token}"})
+        branch_id = branch_response.json()["branch_id"]
+
+        course_data = {"name": "Restriction Course", "description": "A test course", "duration_months": 1, "base_fee": 100}
+        course_response = client.post("/api/courses", json=course_data, headers={"Authorization": f"Bearer {admin_token}"})
+        course_id = course_response.json()["course_id"]
+
+        student_email = "overdue.student@test.com"
+        student_pass = "password"
+        s1_data = {"email": student_email, "password": student_pass, "full_name": "Overdue Student", "phone": "3", "role": "student", "branch_id": branch_id}
+        s1_id = client.post("/api/auth/register", json=s1_data).json()["user_id"]
+        e1_data = {"student_id": s1_id, "course_id": course_id, "branch_id": branch_id, "start_date": datetime.now().isoformat(), "fee_amount": 100.0}
+        e1_id = client.post("/api/enrollments", json=e1_data, headers={"Authorization": f"Bearer {admin_token}"}).json()["enrollment_id"]
+
+        # Find the pending payment and mark it as overdue
+        payments = client.get(f"/api/payments?enrollment_id={e1_id}", headers={"Authorization": f"Bearer {admin_token}"}).json()["payments"]
+        payment_to_update = payments[0]
+        client.put(f"/api/payments/{payment_to_update['id']}", json={"payment_status": "overdue"}, headers={"Authorization": f"Bearer {admin_token}"})
+
+        # Login as the student
+        student_token = client.post("/api/auth/login", json={"email": student_email, "password": student_pass}).json()["access_token"]
+
+        # 1. Test: Access is restricted
+        me_response_fail = client.get("/api/auth/me", headers={"Authorization": f"Bearer {student_token}"})
+        assert me_response_fail.status_code == 403
+
+        # 2. Test: Pay the overdue bill and regain access
+        client.put(f"/api/payments/{payment_to_update['id']}", json={"payment_status": "paid", "transaction_id": "T-OVERDUE"}, headers={"Authorization": f"Bearer {admin_token}"})
+        me_response_success = client.get("/api/auth/me", headers={"Authorization": f"Bearer {student_token}"})
+        assert me_response_success.status_code == 200

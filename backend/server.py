@@ -440,6 +440,16 @@ async def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(s
 async def get_current_active_user(current_user: dict = Depends(get_current_user)):
     if not current_user.get("is_active", False):
         raise HTTPException(status_code=400, detail="Inactive user")
+
+    # Restrict access for students with overdue payments
+    if current_user["role"] == UserRole.STUDENT:
+        overdue_payment = await db.payments.find_one({
+            "student_id": current_user["id"],
+            "payment_status": PaymentStatus.OVERDUE.value
+        })
+        if overdue_payment:
+            raise HTTPException(status_code=403, detail="Access restricted due to overdue payments.")
+
     return current_user
 
 def require_role(allowed_roles: List[UserRole]):
@@ -898,6 +908,24 @@ async def update_course(
     
     return {"message": "Course updated successfully"}
 
+@api_router.get("/courses/{course_id}/stats")
+async def get_course_stats(
+    course_id: str,
+    current_user: dict = Depends(require_role([UserRole.SUPER_ADMIN, UserRole.COACH_ADMIN]))
+):
+    """Get statistics for a specific course."""
+    course = await db.courses.find_one({"id": course_id})
+    if not course:
+        raise HTTPException(status_code=404, detail="Course not found")
+
+    active_enrollments = await db.enrollments.count_documents({"course_id": course_id, "is_active": True})
+
+    stats = {
+        "course_details": serialize_doc(course),
+        "active_enrollments": active_enrollments
+    }
+    return stats
+
 # STUDENT ENROLLMENT ENDPOINTS
 @api_router.post("/enrollments")
 async def create_enrollment(
@@ -1190,6 +1218,33 @@ async def process_payment(
         await send_whatsapp(student["phone"], message)
     
     return {"message": "Payment processed successfully", "payment_id": payment.id}
+
+class PaymentUpdate(BaseModel):
+    payment_status: PaymentStatus
+    transaction_id: Optional[str] = None
+    notes: Optional[str] = None
+
+@api_router.put("/payments/{payment_id}")
+async def update_payment(
+    payment_id: str,
+    payment_update: PaymentUpdate,
+    current_user: dict = Depends(require_role([UserRole.SUPER_ADMIN, UserRole.COACH_ADMIN]))
+):
+    """Update a payment's status."""
+    update_data = payment_update.dict(exclude_unset=True)
+    update_data["updated_at"] = datetime.utcnow()
+    if payment_update.payment_status == PaymentStatus.PAID:
+        update_data["payment_date"] = datetime.utcnow()
+
+    result = await db.payments.update_one(
+        {"id": payment_id},
+        {"$set": update_data}
+    )
+
+    if result.matched_count == 0:
+        raise HTTPException(status_code=404, detail="Payment not found")
+
+    return {"message": "Payment updated successfully"}
 
 @api_router.get("/payments")
 async def get_payments(
@@ -1525,6 +1580,67 @@ async def get_dashboard_stats(
     stats["today_attendance"] = today_attendance
     
     return {"dashboard_stats": stats}
+
+@api_router.get("/reports/financial")
+async def get_financial_report(
+    current_user: dict = Depends(require_role([UserRole.SUPER_ADMIN]))
+):
+    """Get a financial report summary."""
+    total_collected = await db.payments.aggregate([
+        {"$match": {"payment_status": PaymentStatus.PAID.value}},
+        {"$group": {"_id": None, "total": {"$sum": "$amount"}}}
+    ]).to_list(1)
+
+    pending_payments_cursor = db.payments.find({"payment_status": PaymentStatus.PENDING.value})
+    pending_payments = await pending_payments_cursor.to_list(length=1000)
+    print("Pending payments being aggregated:", pending_payments)
+
+    outstanding_dues = await db.payments.aggregate([
+        {"$match": {"payment_status": PaymentStatus.PENDING.value}},
+        {"$group": {"_id": None, "total": {"$sum": "$amount"}}}
+    ]).to_list(1)
+
+    report = {
+        "total_collected": total_collected[0]["total"] if total_collected else 0,
+        "outstanding_dues": outstanding_dues[0]["total"] if outstanding_dues else 0,
+        "report_generated_at": datetime.utcnow()
+    }
+    return report
+
+@api_router.get("/reports/branch/{branch_id}")
+async def get_branch_report(
+    branch_id: str,
+    current_user: dict = Depends(require_role([UserRole.SUPER_ADMIN, UserRole.COACH_ADMIN]))
+):
+    """Get a detailed report for a specific branch."""
+    if current_user["role"] == UserRole.COACH_ADMIN and current_user.get("branch_id") != branch_id:
+        raise HTTPException(status_code=403, detail="You can only access reports for your own branch.")
+
+    branch = await db.branches.find_one({"id": branch_id})
+    if not branch:
+        raise HTTPException(status_code=404, detail="Branch not found")
+
+    # Aggregate data for the report
+    total_students = await db.users.count_documents({"role": "student", "branch_id": branch_id, "is_active": True})
+    active_enrollments = await db.enrollments.count_documents({"branch_id": branch_id, "is_active": True})
+
+    payments_summary = await db.payments.aggregate([
+        {"$match": {"student_id": {"$in": [user["id"] for user in await db.users.find({"branch_id": branch_id}).to_list(1000)]}}},
+        {"$group": {
+            "_id": "$payment_status",
+            "total_amount": {"$sum": "$amount"},
+            "count": {"$sum": 1}
+        }}
+    ]).to_list(1000)
+
+    report = {
+        "branch_details": serialize_doc(branch),
+        "total_students": total_students,
+        "active_enrollments": active_enrollments,
+        "payments_summary": payments_summary,
+        "report_generated_at": datetime.utcnow()
+    }
+    return report
 
 # Add middleware and startup
 app.add_middleware(
