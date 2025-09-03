@@ -135,6 +135,8 @@ class BaseUser(BaseModel):
     phone: str
     full_name: str
     role: UserRole
+    date_of_birth: Optional[date] = None
+    gender: Optional[str] = None
     branch_id: Optional[str] = None
     biometric_id: Optional[str] = None
     is_active: bool = True
@@ -146,6 +148,8 @@ class UserCreate(BaseModel):
     phone: str
     full_name: str
     role: UserRole
+    date_of_birth: Optional[date] = None
+    gender: Optional[str] = None
     branch_id: Optional[str] = None
     biometric_id: Optional[str] = None
     password: Optional[str] = None
@@ -165,6 +169,8 @@ class UserUpdate(BaseModel):
     email: Optional[EmailStr] = None
     phone: Optional[str] = None
     full_name: Optional[str] = None
+    date_of_birth: Optional[date] = None
+    gender: Optional[str] = None
     branch_id: Optional[str] = None
     biometric_id: Optional[str] = None
     is_active: Optional[bool] = None
@@ -488,6 +494,8 @@ def serialize_doc(doc):
         for key, value in doc.items():
             if key == "_id":
                 continue  # Skip MongoDB _id field
+            elif key == "date_of_birth" and isinstance(value, datetime):
+                result[key] = value.strftime("%Y-%m-%d")
             elif isinstance(value, ObjectId):
                 result[key] = str(value)
             elif isinstance(value, dict):
@@ -656,6 +664,9 @@ async def register_user(user_data: UserCreate, request: Request):
     user = BaseUser(**user_data.dict())
     user_dict = user.dict()
     user_dict["password"] = hashed_password
+
+    if "date_of_birth" in user_dict and user_dict["date_of_birth"] is not None:
+        user_dict["date_of_birth"] = datetime.combine(user_dict["date_of_birth"], datetime.min.time())
     
     result = await db.users.insert_one(user_dict)
     
@@ -783,6 +794,9 @@ async def update_profile(
     """Update user profile"""
     update_data = {k: v for k, v in user_update.dict().items() if v is not None}
     update_data["updated_at"] = datetime.utcnow()
+
+    if "date_of_birth" in update_data and update_data["date_of_birth"] is not None:
+        update_data["date_of_birth"] = datetime.combine(update_data["date_of_birth"], datetime.min.time())
     
     await db.users.update_one(
         {"id": current_user["id"]},
@@ -821,6 +835,9 @@ async def create_user(
     user = BaseUser(**user_data.dict())
     user_dict = user.dict()
     user_dict["password"] = hashed_password
+
+    if "date_of_birth" in user_dict and user_dict["date_of_birth"] is not None:
+        user_dict["date_of_birth"] = datetime.combine(user_dict["date_of_birth"], datetime.min.time())
     
     await db.users.insert_one(user_dict)
     
@@ -882,6 +899,9 @@ async def update_user(
         raise HTTPException(status_code=400, detail="No update data provided")
 
     update_data["updated_at"] = datetime.utcnow()
+
+    if "date_of_birth" in update_data and update_data["date_of_birth"] is not None:
+        update_data["date_of_birth"] = datetime.combine(update_data["date_of_birth"], datetime.min.time())
     
     result = await db.users.update_one(
         {"id": user_id},

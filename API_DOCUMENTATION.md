@@ -36,6 +36,8 @@ Authorization: Bearer <your_jwt_token>
   "email": "student@example.com",
   "phone": "+1234567890",
   "full_name": "John Doe",
+  "date_of_birth": "1990-01-01",
+  "gender": "male",
   "role": "student",
   "branch_id": "branch-uuid",
   "password": "optional-password"
@@ -83,6 +85,8 @@ Authorization: Bearer <your_jwt_token>
   "email": "user@example.com",
   "phone": "+1234567890",
   "full_name": "John Doe",
+  "date_of_birth": "1990-01-01",
+  "gender": "male",
   "role": "student",
   "branch_id": "branch-uuid",
   "biometric_id": "fingerprint_123",
@@ -100,6 +104,8 @@ Authorization: Bearer <your_jwt_token>
   "email": "newemail@example.com",
   "phone": "+0987654321",
   "full_name": "Jane Doe",
+  "date_of_birth": "1990-01-01",
+  "gender": "male",
   "biometric_id": "fingerprint_456"
 }
 ```
@@ -150,6 +156,8 @@ Authorization: Bearer <your_jwt_token>
   "email": "newuser@example.com",
   "phone": "+1234567890",
   "full_name": "New User",
+  "date_of_birth": "1990-01-01",
+  "gender": "male",
   "role": "coach_admin",
   "branch_id": "branch-uuid"
 }
@@ -196,6 +204,8 @@ Authorization: Bearer <your_jwt_token>
   "email": "newemail@example.com",
   "phone": "+0987654321",
   "full_name": "Jane Doe",
+  "date_of_birth": "1990-01-01",
+  "gender": "male",
   "biometric_id": "fingerprint_456",
   "is_active": true
 }
