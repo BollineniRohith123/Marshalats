@@ -1,4 +1,5 @@
-from fastapi import FastAPI, APIRouter, HTTPException, Depends, status, Query
+from fastapi import FastAPI, APIRouter, HTTPException, Depends, status, Query, Request
+from fastapi.responses import StreamingResponse
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from fastapi.middleware.cors import CORSMiddleware
 from motor.motor_asyncio import AsyncIOMotorClient
@@ -6,7 +7,7 @@ from dotenv import load_dotenv
 from pathlib import Path
 import os
 import logging
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, date
 from typing import List, Optional, Dict, Any
 from pydantic import BaseModel, Field, EmailStr
 import uuid
@@ -15,6 +16,7 @@ import jwt
 from passlib.context import CryptContext
 import qrcode
 import io
+import csv
 import base64
 from enum import Enum
 import secrets
@@ -82,14 +84,61 @@ class SessionStatus(str, Enum):
     CANCELLED = "cancelled"
     NO_SHOW = "no_show"
 
+class NotificationType(str, Enum):
+    SMS = "sms"
+    WHATSAPP = "whatsapp"
+    EMAIL = "email"
+
 # Base Models
+class NotificationTemplate(BaseModel):
+    id: str = Field(default_factory=lambda: str(uuid.uuid4()))
+    name: str
+    type: NotificationType
+    subject: Optional[str] = None
+    body: str
+    is_active: bool = True
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+    updated_at: datetime = Field(default_factory=datetime.utcnow)
+
+class NotificationTemplateCreate(BaseModel):
+    name: str
+    type: NotificationType
+    subject: Optional[str] = None
+    body: str
+
+class TriggerNotification(BaseModel):
+    user_id: str
+    template_id: str
+    context: Optional[Dict[str, Any]] = {}
+
+class NotificationLog(BaseModel):
+    id: str = Field(default_factory=lambda: str(uuid.uuid4()))
+    user_id: str
+    template_id: str
+    type: NotificationType
+    status: str
+    content: str
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+
+class BroadcastAnnouncement(BaseModel):
+    branch_id: Optional[str] = None
+    template_id: str
+    context: Optional[Dict[str, Any]] = {}
+
+class ClassReminder(BaseModel):
+    course_id: str
+    branch_id: str
+
 class BaseUser(BaseModel):
     id: str = Field(default_factory=lambda: str(uuid.uuid4()))
     email: EmailStr
     phone: str
     full_name: str
+    dob: Optional[date] = None
+    gender: Optional[str] = None
     role: UserRole
     branch_id: Optional[str] = None
+    biometric_id: Optional[str] = None
     is_active: bool = True
     created_at: datetime = Field(default_factory=datetime.utcnow)
     updated_at: datetime = Field(default_factory=datetime.utcnow)
@@ -98,8 +147,11 @@ class UserCreate(BaseModel):
     email: EmailStr
     phone: str
     full_name: str
+    dob: Optional[date] = None
+    gender: Optional[str] = None
     role: UserRole
     branch_id: Optional[str] = None
+    biometric_id: Optional[str] = None
     password: Optional[str] = None
 
 class UserLogin(BaseModel):
@@ -117,7 +169,10 @@ class UserUpdate(BaseModel):
     email: Optional[EmailStr] = None
     phone: Optional[str] = None
     full_name: Optional[str] = None
+    dob: Optional[date] = None
+    gender: Optional[str] = None
     branch_id: Optional[str] = None
+    biometric_id: Optional[str] = None
     is_active: Optional[bool] = None
 
 class Branch(BaseModel):
@@ -158,15 +213,29 @@ class BranchUpdate(BaseModel):
     business_hours: Optional[Dict[str, Dict[str, str]]] = None
     is_active: Optional[bool] = None
 
+class Holiday(BaseModel):
+    id: str = Field(default_factory=lambda: str(uuid.uuid4()))
+    branch_id: str
+    date: date
+    description: str
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+
+class HolidayCreate(BaseModel):
+    date: date
+    description: str
+
 class Course(BaseModel):
     id: str = Field(default_factory=lambda: str(uuid.uuid4()))
     name: str
     description: str
+    category: Optional[str] = None  # e.g., "Martial Arts", "Fitness"
+    level: Optional[str] = None  # e.g., "Beginner", "Intermediate"
     duration_months: int
     base_fee: float
     branch_pricing: Dict[str, float] = {}  # {"branch_id": price}
     coach_id: Optional[str] = None
     schedule: Dict[str, Any] = {}  # Flexible schedule structure
+    attendance_policy: Optional[Dict[str, Any]] = {}
     is_active: bool = True
     created_at: datetime = Field(default_factory=datetime.utcnow)
     updated_at: datetime = Field(default_factory=datetime.utcnow)
@@ -174,20 +243,26 @@ class Course(BaseModel):
 class CourseCreate(BaseModel):
     name: str
     description: str
+    category: Optional[str] = None
+    level: Optional[str] = None
     duration_months: int
     base_fee: float
     branch_pricing: Optional[Dict[str, float]] = {}
     coach_id: Optional[str] = None
     schedule: Optional[Dict[str, Any]] = {}
+    attendance_policy: Optional[Dict[str, Any]] = {}
 
 class CourseUpdate(BaseModel):
     name: Optional[str] = None
     description: Optional[str] = None
+    category: Optional[str] = None
+    level: Optional[str] = None
     duration_months: Optional[int] = None
     base_fee: Optional[float] = None
     branch_pricing: Optional[Dict[str, float]] = None
     coach_id: Optional[str] = None
     schedule: Optional[Dict[str, Any]] = None
+    attendance_policy: Optional[Dict[str, Any]] = {}
     is_active: Optional[bool] = None
 
 class Enrollment(BaseModel):
@@ -212,6 +287,10 @@ class EnrollmentCreate(BaseModel):
     start_date: datetime
     fee_amount: float
     admission_fee: float = 500.0
+
+class EnrollmentUpdate(BaseModel):
+    is_active: Optional[bool] = None
+    payment_status: Optional[PaymentStatus] = None
 
 class Payment(BaseModel):
     id: str = Field(default_factory=lambda: str(uuid.uuid4()))
@@ -262,8 +341,14 @@ class AttendanceCreate(BaseModel):
     branch_id: str
     attendance_date: datetime
     method: AttendanceMethod
+    is_present: bool = True
     qr_code_used: Optional[str] = None
     notes: Optional[str] = None
+
+class BiometricAttendance(BaseModel):
+    device_id: str
+    biometric_id: str
+    timestamp: datetime
 
 class QRCodeSession(BaseModel):
     id: str = Field(default_factory=lambda: str(uuid.uuid4()))
@@ -283,6 +368,7 @@ class Product(BaseModel):
     category: str  # "uniform", "gloves", "belt", "accessories"
     price: float
     branch_availability: Dict[str, int] = {}  # {"branch_id": stock_count}
+    stock_alert_threshold: int = 10
     image_url: Optional[str] = None
     is_active: bool = True
     created_at: datetime = Field(default_factory=datetime.utcnow)
@@ -294,6 +380,7 @@ class ProductCreate(BaseModel):
     category: str
     price: float
     branch_availability: Optional[Dict[str, int]] = {}
+    stock_alert_threshold: Optional[int] = 10
     image_url: Optional[str] = None
 
 class ProductUpdate(BaseModel):
@@ -302,6 +389,7 @@ class ProductUpdate(BaseModel):
     category: Optional[str] = None
     price: Optional[float] = None
     branch_availability: Optional[Dict[str, int]] = None
+    stock_alert_threshold: Optional[int] = None
     image_url: Optional[str] = None
     is_active: Optional[bool] = None
 
@@ -323,6 +411,10 @@ class ProductPurchaseCreate(BaseModel):
     branch_id: str
     quantity: int
     payment_method: str
+
+class RestockRequest(BaseModel):
+    branch_id: str
+    quantity: int
 
 class Complaint(BaseModel):
     id: str = Field(default_factory=lambda: str(uuid.uuid4()))
@@ -388,6 +480,16 @@ class SessionBookingCreate(BaseModel):
     duration_minutes: int = 60
     notes: Optional[str] = None
 
+class ActivityLog(BaseModel):
+    id: str = Field(default_factory=lambda: str(uuid.uuid4()))
+    user_id: Optional[str] = None
+    user_name: Optional[str] = None
+    action: str
+    details: Optional[Dict[str, Any]] = None
+    status: str  # "success" or "failure"
+    ip_address: Optional[str] = None
+    timestamp: datetime = Field(default_factory=datetime.utcnow)
+
 # Authentication utilities
 def serialize_doc(doc):
     """Convert MongoDB document to JSON serializable format"""
@@ -452,6 +554,31 @@ async def get_current_active_user(current_user: dict = Depends(get_current_user)
             "payment_status": PaymentStatus.OVERDUE.value
         })
         if overdue_payment:
+            # Notify Coach Admin that a student's access is restricted
+            if current_user.get("branch_id"):
+                coach_admin = await db.users.find_one({
+                    "branch_id": current_user["branch_id"],
+                    "role": UserRole.COACH_ADMIN.value
+                })
+                template = await db.notification_templates.find_one({"name": "payment_default_alert"})
+                if coach_admin and template:
+                    body = template["body"].replace("{{student_name}}", current_user["full_name"])
+
+                    success = False
+                    if template["type"] == NotificationType.WHATSAPP.value:
+                        success = await send_whatsapp(coach_admin["phone"], body)
+                    elif template["type"] == NotificationType.SMS.value:
+                        success = await send_sms(coach_admin["phone"], body)
+
+                    log_entry = NotificationLog(
+                        user_id=coach_admin["id"],
+                        template_id=template["id"],
+                        type=template["type"],
+                        status="sent" if success else "failed",
+                        content=body
+                    )
+                    await db.notification_logs.insert_one(log_entry.dict())
+
             raise HTTPException(status_code=403, detail="Access restricted due to overdue payments.")
 
     return current_user
@@ -488,9 +615,67 @@ async def send_whatsapp(phone: str, message: str) -> bool:
     logging.info(f"Mock WhatsApp sent to {phone}: {message}")
     return True
 
+# Activity Logging utility
+async def log_activity(
+    request: Request,
+    action: str,
+    status: str = "success",
+    user_id: Optional[str] = None,
+    user_name: Optional[str] = None,
+    details: Optional[Dict[str, Any]] = None
+):
+    """Helper function to log user activity."""
+    log_entry = ActivityLog(
+        user_id=user_id,
+        user_name=user_name,
+        action=action,
+        details=details,
+        status=status,
+        ip_address=request.client.host if request else "N/A",
+        timestamp=datetime.utcnow()
+    )
+    await db.activity_logs.insert_one(log_entry.dict())
+
+async def check_and_send_stock_alert(product: dict, branch_id: str, new_stock_level: int):
+    """Checks if stock is low and sends an alert if needed."""
+    threshold = product.get("stock_alert_threshold", 10)
+    if new_stock_level <= threshold:
+        # Find admins to notify (Super Admins and the Coach Admin of the branch)
+        admin_filter = {
+            "$or": [
+                {"role": UserRole.SUPER_ADMIN.value},
+                {"role": UserRole.COACH_ADMIN.value, "branch_id": branch_id}
+            ]
+        }
+        admins = await db.users.find(admin_filter).to_list(length=None)
+
+        template = await db.notification_templates.find_one({"name": "low_stock_alert"})
+        if not template or not admins:
+            return # Cannot send alert if no template or no admins
+
+        for admin in admins:
+            body = template["body"].replace("{{product_name}}", product["name"])
+            body = body.replace("{{branch_id}}", branch_id)
+            body = body.replace("{{stock_level}}", str(new_stock_level))
+
+            success = False
+            if template["type"] == NotificationType.WHATSAPP.value:
+                success = await send_whatsapp(admin["phone"], body)
+            elif template["type"] == NotificationType.SMS.value:
+                success = await send_sms(admin["phone"], body)
+
+            log_entry = NotificationLog(
+                user_id=admin["id"],
+                template_id=template["id"],
+                type=template["type"],
+                status="sent" if success else "failed",
+                content=body
+            )
+            await db.notification_logs.insert_one(log_entry.dict())
+
 # AUTHENTICATION ENDPOINTS
 @api_router.post("/auth/register")
-async def register_user(user_data: UserCreate):
+async def register_user(user_data: UserCreate, request: Request):
     """Register a new student (public endpoint)"""
     # Check if user exists
     existing_user = await db.users.find_one({
@@ -510,25 +695,59 @@ async def register_user(user_data: UserCreate):
     user = BaseUser(**user_data.dict())
     user_dict = user.dict()
     user_dict["password"] = hashed_password
+
+    if "dob" in user_dict and user_dict["dob"] is not None:
+        user_dict["dob"] = datetime.combine(user_dict["dob"], datetime.min.time())
     
     result = await db.users.insert_one(user_dict)
     
     # Send credentials via SMS (mock)
     await send_sms(user.phone, f"Your account created. Email: {user.email}, Password: {user_data.password}")
     
+    await log_activity(
+        request=request,
+        action="user_registration",
+        user_id=user.id,
+        user_name=user.full_name,
+        details={"email": user.email, "role": user.role}
+    )
+
     return {"message": "User registered successfully", "user_id": user.id}
 
 @api_router.post("/auth/login")
-async def login(user_credentials: UserLogin):
+async def login(user_credentials: UserLogin, request: Request):
     """User login"""
     user = await db.users.find_one({"email": user_credentials.email})
     if not user or not verify_password(user_credentials.password, user["password"]):
+        await log_activity(
+            request=request,
+            action="login_attempt",
+            status="failure",
+            details={"email": user_credentials.email, "reason": "Incorrect email or password"}
+        )
         raise HTTPException(status_code=401, detail="Incorrect email or password")
     
     if not user.get("is_active", False):
+        await log_activity(
+            request=request,
+            action="login_attempt",
+            status="failure",
+            user_id=user["id"],
+            user_name=user["full_name"],
+            details={"email": user_credentials.email, "reason": "Account is deactivated"}
+        )
         raise HTTPException(status_code=400, detail="Account is deactivated")
     
     access_token = create_access_token(data={"sub": user["id"]})
+
+    await log_activity(
+        request=request,
+        action="login_success",
+        user_id=user["id"],
+        user_name=user["full_name"],
+        details={"email": user["email"]}
+    )
+
     return {"access_token": access_token, "token_type": "bearer", "user": {
         "id": user["id"],
         "email": user["email"],
@@ -593,9 +812,20 @@ async def reset_password(reset_password_data: ResetPassword):
 
 @api_router.get("/auth/me")
 async def get_current_user_info(current_user: dict = Depends(get_current_active_user)):
-    """Get current user information"""
+    """Get current user information, including branch and manager details if applicable."""
     user_info = current_user.copy()
     user_info.pop("password", None)
+
+    if user_info.get("branch_id"):
+        branch = await db.branches.find_one({"id": user_info["branch_id"]})
+        if branch:
+            branch_details = {"name": branch.get("name"), "id": branch.get("id")}
+            if branch.get("manager_id"):
+                manager = await db.users.find_one({"id": branch["manager_id"]})
+                if manager:
+                    branch_details["manager_name"] = manager.get("full_name")
+            user_info["branch_details"] = branch_details
+
     return user_info
 
 @api_router.put("/auth/profile")
@@ -617,6 +847,7 @@ async def update_profile(
 @api_router.post("/users")
 async def create_user(
     user_data: UserCreate,
+    request: Request,
     current_user: dict = Depends(require_role([UserRole.SUPER_ADMIN, UserRole.COACH_ADMIN]))
 ):
     """Create new user (Super Admin or Coach Admin)"""
@@ -643,12 +874,23 @@ async def create_user(
     user = BaseUser(**user_data.dict())
     user_dict = user.dict()
     user_dict["password"] = hashed_password
+
+    if "dob" in user_dict and user_dict["dob"] is not None:
+        user_dict["dob"] = datetime.combine(user_dict["dob"], datetime.min.time())
     
     await db.users.insert_one(user_dict)
     
     # Send credentials
     await send_sms(user.phone, f"Account created. Email: {user.email}, Password: {user_data.password}")
     
+    await log_activity(
+        request=request,
+        action="admin_create_user",
+        user_id=current_user["id"],
+        user_name=current_user["full_name"],
+        details={"created_user_id": user.id, "created_user_email": user.email, "role": user.role}
+    )
+
     return {"message": "User created successfully", "user_id": user.id}
 
 @api_router.get("/users")
@@ -676,6 +918,7 @@ async def get_users(
 async def update_user(
     user_id: str,
     user_update: UserUpdate,
+    request: Request,
     current_user: dict = Depends(require_role([UserRole.SUPER_ADMIN, UserRole.COACH_ADMIN]))
 ):
     """Update user (Super Admin or Coach Admin)"""
@@ -705,7 +948,89 @@ async def update_user(
         # This case should be rare due to the check above, but it's good practice
         raise HTTPException(status_code=404, detail="User not found")
     
+    await log_activity(
+        request=request,
+        action="admin_update_user",
+        user_id=current_user["id"],
+        user_name=current_user["full_name"],
+        details={"updated_user_id": user_id, "update_data": user_update.dict(exclude_unset=True)}
+    )
+
+    # Notify the branch's Coach Admin about the update
+    if target_user.get("branch_id"):
+        # Re-fetch the user to get the updated details for the notification
+        updated_user = await db.users.find_one({"id": user_id})
+
+        coach_admin = await db.users.find_one({
+            "branch_id": updated_user["branch_id"],
+            "role": UserRole.COACH_ADMIN.value
+        })
+        template = await db.notification_templates.find_one({"name": "profile_update_alert"})
+
+        if coach_admin and template and updated_user:
+            body = template["body"].replace("{{updated_user_name}}", updated_user["full_name"])
+            body = body.replace("{{admin_name}}", current_user["full_name"])
+
+            success = False
+            if template["type"] == NotificationType.WHATSAPP.value:
+                success = await send_whatsapp(coach_admin["phone"], body)
+            elif template["type"] == NotificationType.SMS.value:
+                success = await send_sms(coach_admin["phone"], body)
+
+            log_entry = NotificationLog(
+                user_id=coach_admin["id"],
+                template_id=template["id"],
+                type=template["type"],
+                status="sent" if success else "failed",
+                content=body
+            )
+            await db.notification_logs.insert_one(log_entry.dict())
+
     return {"message": "User updated successfully"}
+
+@api_router.post("/users/{user_id}/force-password-reset")
+async def force_password_reset(
+    user_id: str,
+    request: Request,
+    current_user: dict = Depends(require_role([UserRole.SUPER_ADMIN, UserRole.COACH_ADMIN]))
+):
+    """Force a password reset for a user (Admins only)."""
+    target_user = await db.users.find_one({"id": user_id})
+    if not target_user:
+        raise HTTPException(status_code=404, detail="User not found")
+
+    # Check permissions
+    if current_user["role"] == UserRole.COACH_ADMIN:
+        if target_user.get("branch_id") != current_user.get("branch_id"):
+            raise HTTPException(status_code=403, detail="Coach Admins can only reset passwords for users in their own branch.")
+        if target_user.get("role") not in [UserRole.STUDENT.value, UserRole.COACH.value]:
+            raise HTTPException(status_code=403, detail="Coach Admins can only reset passwords for Students and Coaches.")
+
+    # Generate a new temporary password
+    new_password = secrets.token_urlsafe(8)
+    hashed_password = hash_password(new_password)
+
+    # Update the user's password in the database
+    await db.users.update_one(
+        {"id": user_id},
+        {"$set": {"password": hashed_password, "updated_at": datetime.utcnow()}}
+    )
+
+    # Log the activity
+    await log_activity(
+        request=request,
+        action="admin_force_password_reset",
+        user_id=current_user["id"],
+        user_name=current_user["full_name"],
+        details={"reset_user_id": user_id, "reset_user_email": target_user["email"]}
+    )
+
+    # Send the new password to the user
+    message = f"Your password has been reset by an administrator. Your new temporary password is: {new_password}"
+    await send_sms(target_user["phone"], message)
+    await send_whatsapp(target_user["phone"], message)
+
+    return {"message": f"Password for user {target_user['full_name']} has been reset and sent to them."}
 
 # TRANSFER REQUESTS
 class TransferRequestStatus(str, Enum):
@@ -729,6 +1054,58 @@ class TransferRequestCreate(BaseModel):
 
 class TransferRequestUpdate(BaseModel):
     status: TransferRequestStatus
+
+class CourseChangeRequestStatus(str, Enum):
+    PENDING = "pending"
+    APPROVED = "approved"
+    REJECTED = "rejected"
+
+class CourseChangeRequest(BaseModel):
+    id: str = Field(default_factory=lambda: str(uuid.uuid4()))
+    student_id: str
+    branch_id: str
+    current_enrollment_id: str
+    new_course_id: str
+    reason: str
+    status: CourseChangeRequestStatus = CourseChangeRequestStatus.PENDING
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+    updated_at: datetime = Field(default_factory=datetime.utcnow)
+
+class CourseChangeRequestCreate(BaseModel):
+    current_enrollment_id: str
+    new_course_id: str
+    reason: str
+
+class CourseChangeRequestUpdate(BaseModel):
+    status: CourseChangeRequestStatus
+
+class ResourceType(str, Enum):
+    STAFF = "staff"
+    MAINTENANCE = "maintenance"
+    OTHER = "other"
+
+class ResourceRequestStatus(str, Enum):
+    PENDING = "pending"
+    APPROVED = "approved"
+    REJECTED = "rejected"
+    FULFILLED = "fulfilled"
+
+class ResourceRequest(BaseModel):
+    id: str = Field(default_factory=lambda: str(uuid.uuid4()))
+    branch_id: str
+    requested_by_id: str
+    resource_type: ResourceType
+    description: str
+    status: ResourceRequestStatus = ResourceRequestStatus.PENDING
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+    updated_at: datetime = Field(default_factory=datetime.utcnow)
+
+class ResourceRequestCreate(BaseModel):
+    resource_type: ResourceType
+    description: str
+
+class ResourceRequestUpdate(BaseModel):
+    status: ResourceRequestStatus
 
 @api_router.post("/requests/transfer", status_code=status.HTTP_201_CREATED)
 async def create_transfer_request(
@@ -793,6 +1170,155 @@ async def update_transfer_request(
         )
 
     return {"message": "Transfer request updated successfully.", "request": serialize_doc(updated_request)}
+
+@api_router.post("/requests/course-change", status_code=status.HTTP_201_CREATED)
+async def create_course_change_request(
+    request_data: CourseChangeRequestCreate,
+    current_user: dict = Depends(require_role([UserRole.STUDENT]))
+):
+    """Create a new course change request."""
+    # Find the current enrollment to ensure it belongs to the student and is active
+    current_enrollment = await db.enrollments.find_one({
+        "id": request_data.current_enrollment_id,
+        "student_id": current_user["id"],
+        "is_active": True
+    })
+    if not current_enrollment:
+        raise HTTPException(status_code=404, detail="Active enrollment not found.")
+
+    # Check if the new course exists
+    new_course = await db.courses.find_one({"id": request_data.new_course_id})
+    if not new_course:
+        raise HTTPException(status_code=404, detail="New course not found.")
+
+    course_change_request = CourseChangeRequest(
+        student_id=current_user["id"],
+        branch_id=current_enrollment["branch_id"],
+        **request_data.dict()
+    )
+    await db.course_change_requests.insert_one(course_change_request.dict())
+    return course_change_request
+
+@api_router.get("/requests/course-change")
+async def get_course_change_requests(
+    status: Optional[CourseChangeRequestStatus] = None,
+    current_user: dict = Depends(require_role([UserRole.SUPER_ADMIN, UserRole.COACH_ADMIN]))
+):
+    """Get a list of course change requests."""
+    filter_query = {}
+    if status:
+        filter_query["status"] = status.value
+
+    if current_user["role"] == UserRole.COACH_ADMIN:
+        filter_query["branch_id"] = current_user.get("branch_id")
+
+    requests = await db.course_change_requests.find(filter_query).to_list(1000)
+    return {"requests": serialize_doc(requests)}
+
+@api_router.put("/requests/course-change/{request_id}")
+async def update_course_change_request(
+    request_id: str,
+    update_data: CourseChangeRequestUpdate,
+    current_user: dict = Depends(require_role([UserRole.SUPER_ADMIN, UserRole.COACH_ADMIN]))
+):
+    """Update a course change request (approve/reject)."""
+    change_request = await db.course_change_requests.find_one({"id": request_id})
+    if not change_request:
+        raise HTTPException(status_code=404, detail="Course change request not found")
+
+    if current_user["role"] == UserRole.COACH_ADMIN:
+        if change_request["branch_id"] != current_user.get("branch_id"):
+            raise HTTPException(status_code=403, detail="You can only manage requests for your own branch.")
+
+    updated_request = await db.course_change_requests.find_one_and_update(
+        {"id": request_id},
+        {"$set": {"status": update_data.status.value, "updated_at": datetime.utcnow()}},
+        return_document=True
+    )
+
+    # If approved, perform the change
+    if update_data.status == CourseChangeRequestStatus.APPROVED:
+        # 1. Deactivate old enrollment
+        await db.enrollments.update_one(
+            {"id": change_request["current_enrollment_id"]},
+            {"$set": {"is_active": False}}
+        )
+
+        # 2. Create new enrollment
+        new_course = await db.courses.find_one({"id": change_request["new_course_id"]})
+        if not new_course:
+            # This should be rare, but handle it
+            raise HTTPException(status_code=404, detail="New course not found during approval process.")
+
+        # Determine fee for the new course
+        fee_amount = new_course.get("base_fee")
+        branch_pricing = new_course.get("branch_pricing", {})
+        if change_request["branch_id"] in branch_pricing:
+            fee_amount = branch_pricing[change_request["branch_id"]]
+
+        # For simplicity, we'll start a new standard enrollment.
+        # A real-world scenario might involve complex fee calculations.
+        new_enrollment = Enrollment(
+            student_id=change_request["student_id"],
+            course_id=change_request["new_course_id"],
+            branch_id=change_request["branch_id"],
+            start_date=datetime.utcnow(),
+            end_date=datetime.utcnow() + timedelta(days=new_course["duration_months"] * 30),
+            fee_amount=fee_amount,
+            admission_fee=0 # No new admission fee for a course change
+        )
+        await db.enrollments.insert_one(new_enrollment.dict())
+
+    return {"message": "Course change request updated successfully.", "request": serialize_doc(updated_request)}
+
+@api_router.post("/requests/resource", status_code=status.HTTP_201_CREATED)
+async def create_resource_request(
+    request_data: ResourceRequestCreate,
+    current_user: dict = Depends(require_role([UserRole.COACH_ADMIN]))
+):
+    """Create a new resource request for the user's branch."""
+    if not current_user.get("branch_id"):
+        raise HTTPException(status_code=400, detail="User is not assigned to a branch.")
+
+    resource_request = ResourceRequest(
+        branch_id=current_user["branch_id"],
+        requested_by_id=current_user["id"],
+        **request_data.dict()
+    )
+    await db.resource_requests.insert_one(resource_request.dict())
+    return resource_request
+
+@api_router.get("/requests/resource")
+async def get_resource_requests(
+    status: Optional[ResourceRequestStatus] = None,
+    current_user: dict = Depends(require_role([UserRole.SUPER_ADMIN, UserRole.COACH_ADMIN]))
+):
+    """Get a list of resource requests."""
+    filter_query = {}
+    if status:
+        filter_query["status"] = status.value
+
+    if current_user["role"] == UserRole.COACH_ADMIN:
+        filter_query["branch_id"] = current_user.get("branch_id")
+
+    requests = await db.resource_requests.find(filter_query).to_list(1000)
+    return {"requests": serialize_doc(requests)}
+
+@api_router.put("/requests/resource/{request_id}")
+async def update_resource_request(
+    request_id: str,
+    update_data: ResourceRequestUpdate,
+    current_user: dict = Depends(require_role([UserRole.SUPER_ADMIN]))
+):
+    """Update a resource request (Super Admin only)."""
+    result = await db.resource_requests.find_one_and_update(
+        {"id": request_id},
+        {"$set": {"status": update_data.status.value, "updated_at": datetime.utcnow()}},
+        return_document=True
+    )
+    if not result:
+        raise HTTPException(status_code=404, detail="Resource request not found")
+    return {"message": "Resource request updated successfully.", "request": serialize_doc(result)}
 
 # BRANCH EVENT MANAGEMENT
 class Event(BaseModel):
@@ -877,6 +1403,7 @@ async def delete_event(
 @api_router.delete("/users/{user_id}")
 async def deactivate_user(
     user_id: str,
+    request: Request,
     current_user: dict = Depends(require_role([UserRole.SUPER_ADMIN]))
 ):
     """Deactivate user (Super Admin only)"""
@@ -888,6 +1415,14 @@ async def deactivate_user(
     if result.matched_count == 0:
         raise HTTPException(status_code=404, detail="User not found")
     
+    await log_activity(
+        request=request,
+        action="admin_deactivate_user",
+        user_id=current_user["id"],
+        user_name=current_user["full_name"],
+        details={"deactivated_user_id": user_id}
+    )
+
     return {"message": "User deactivated successfully"}
 
 # BRANCH MANAGEMENT ENDPOINTS
@@ -926,10 +1461,24 @@ async def get_branch(
 async def update_branch(
     branch_id: str,
     branch_update: BranchUpdate,
-    current_user: dict = Depends(require_role([UserRole.SUPER_ADMIN]))
+    current_user: dict = Depends(require_role([UserRole.SUPER_ADMIN, UserRole.COACH_ADMIN]))
 ):
     """Update branch"""
-    update_data = {k: v for k, v in branch_update.dict().items() if v is not None}
+    # Coach Admin permission check
+    if current_user["role"] == UserRole.COACH_ADMIN:
+        if current_user.get("branch_id") != branch_id:
+            raise HTTPException(status_code=403, detail="You can only update your own branch.")
+        # Restrict fields a Coach Admin can update
+        update_dict = branch_update.dict(exclude_unset=True)
+        restricted_fields = ["manager_id", "is_active"]
+        for field in restricted_fields:
+            if field in update_dict:
+                raise HTTPException(status_code=403, detail=f"You do not have permission to update the '{field}' field.")
+
+    update_data = {k: v for k, v in branch_update.dict(exclude_unset=True).items()}
+    if not update_data:
+        raise HTTPException(status_code=400, detail="No update data provided")
+
     update_data["updated_at"] = datetime.utcnow()
     
     result = await db.branches.update_one(
@@ -941,6 +1490,74 @@ async def update_branch(
         raise HTTPException(status_code=404, detail="Branch not found")
     
     return {"message": "Branch updated successfully"}
+
+@api_router.post("/branches/{branch_id}/holidays", status_code=status.HTTP_201_CREATED)
+async def create_holiday(
+    branch_id: str,
+    holiday_data: HolidayCreate,
+    current_user: dict = Depends(require_role([UserRole.SUPER_ADMIN, UserRole.COACH_ADMIN]))
+):
+    """Create a new holiday for a branch."""
+    if current_user["role"] == UserRole.COACH_ADMIN and current_user.get("branch_id") != branch_id:
+        raise HTTPException(status_code=403, detail="You can only add holidays to your own branch.")
+
+    holiday = Holiday(
+        **holiday_data.dict(),
+        branch_id=branch_id
+    )
+    # Convert date to datetime for MongoDB serialization
+    holiday_dict = holiday.dict()
+    holiday_dict["date"] = datetime.combine(holiday_dict["date"], datetime.min.time())
+
+    await db.holidays.insert_one(holiday_dict)
+    return holiday
+
+@api_router.get("/branches/{branch_id}/holidays")
+async def get_holidays(
+    branch_id: str,
+    current_user: dict = Depends(get_current_active_user)
+):
+    """Get all holidays for a specific branch."""
+    holidays = await db.holidays.find({"branch_id": branch_id}).to_list(1000)
+    return {"holidays": serialize_doc(holidays)}
+
+@api_router.delete("/branches/{branch_id}/holidays/{holiday_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_holiday(
+    branch_id: str,
+    holiday_id: str,
+    current_user: dict = Depends(require_role([UserRole.SUPER_ADMIN, UserRole.COACH_ADMIN]))
+):
+    """Delete a holiday for a branch."""
+    if current_user["role"] == UserRole.COACH_ADMIN and current_user.get("branch_id") != branch_id:
+        raise HTTPException(status_code=403, detail="You can only delete holidays from your own branch.")
+
+    result = await db.holidays.delete_one({"id": holiday_id, "branch_id": branch_id})
+    if result.deleted_count == 0:
+        raise HTTPException(status_code=404, detail="Holiday not found")
+    return
+
+@api_router.delete("/branches/{branch_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_branch(
+    branch_id: str,
+    current_user: dict = Depends(require_role([UserRole.SUPER_ADMIN]))
+):
+    """
+    Permanently delete a branch. Branches with associated users cannot be deleted.
+    """
+    # Check for any users associated with this branch
+    existing_user = await db.users.find_one({"branch_id": branch_id})
+    if existing_user:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Cannot delete branch with associated users. Deactivate it instead."
+        )
+
+    # Delete the branch
+    result = await db.branches.delete_one({"id": branch_id})
+    if result.deleted_count == 0:
+        raise HTTPException(status_code=404, detail="Branch not found")
+
+    return
 
 # COURSE MANAGEMENT ENDPOINTS
 @api_router.post("/courses")
@@ -956,6 +1573,8 @@ async def create_course(
 @api_router.get("/courses")
 async def get_courses(
     branch_id: Optional[str] = None,
+    category: Optional[str] = None,
+    level: Optional[str] = None,
     skip: int = 0,
     limit: int = 50,
     current_user: dict = Depends(get_current_active_user)
@@ -963,6 +1582,11 @@ async def get_courses(
     """Get courses"""
     filter_query = {"is_active": True}
     
+    if category:
+        filter_query["category"] = category
+    if level:
+        filter_query["level"] = level
+
     courses = await db.courses.find(filter_query).skip(skip).limit(limit).to_list(length=limit)
     
     # Filter by branch pricing if branch_id provided
@@ -990,6 +1614,29 @@ async def update_course(
         raise HTTPException(status_code=404, detail="Course not found")
     
     return {"message": "Course updated successfully"}
+
+@api_router.delete("/courses/{course_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_course(
+    course_id: str,
+    current_user: dict = Depends(require_role([UserRole.SUPER_ADMIN]))
+):
+    """
+    Permanently delete a course. Courses with existing enrollments cannot be deleted.
+    """
+    # Check for existing enrollments for this course
+    existing_enrollment = await db.enrollments.find_one({"course_id": course_id})
+    if existing_enrollment:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Cannot delete course with existing enrollments. Deactivate it instead."
+        )
+
+    # Delete the course
+    result = await db.courses.delete_one({"id": course_id})
+    if result.deleted_count == 0:
+        raise HTTPException(status_code=404, detail="Course not found")
+
+    return
 
 @api_router.get("/courses/{course_id}/stats")
 async def get_course_stats(
@@ -1123,6 +1770,52 @@ async def get_student_courses(
             })
     
     return {"enrolled_courses": serialize_doc(result)}
+
+@api_router.put("/enrollments/{enrollment_id}")
+async def update_enrollment(
+    enrollment_id: str,
+    enrollment_update: EnrollmentUpdate,
+    current_user: dict = Depends(require_role([UserRole.SUPER_ADMIN, UserRole.COACH_ADMIN]))
+):
+    """Update an enrollment's status (e.g., to mark as inactive/complete)."""
+    enrollment = await db.enrollments.find_one({"id": enrollment_id})
+    if not enrollment:
+        raise HTTPException(status_code=404, detail="Enrollment not found")
+
+    # Permission check for Coach Admin
+    if current_user["role"] == UserRole.COACH_ADMIN:
+        if enrollment["branch_id"] != current_user.get("branch_id"):
+            raise HTTPException(status_code=403, detail="You can only update enrollments in your own branch.")
+
+    update_data = enrollment_update.dict(exclude_unset=True)
+    result = await db.enrollments.update_one({"id": enrollment_id}, {"$set": update_data})
+
+    # If enrollment is being deactivated, send completion notification
+    if enrollment_update.is_active is False:
+        student = await db.users.find_one({"id": enrollment["student_id"]})
+        course = await db.courses.find_one({"id": enrollment["course_id"]})
+        template = await db.notification_templates.find_one({"name": "course_completion"})
+
+        if student and course and template:
+            body = template["body"].replace("{{student_name}}", student["full_name"])
+            body = body.replace("{{course_name}}", course["name"])
+
+            success = False
+            if template["type"] == NotificationType.WHATSAPP.value:
+                success = await send_whatsapp(student["phone"], body)
+            elif template["type"] == NotificationType.SMS.value:
+                success = await send_sms(student["phone"], body)
+
+            log_entry = NotificationLog(
+                user_id=student["id"],
+                template_id=template["id"],
+                type=template["type"],
+                status="sent" if success else "failed",
+                content=body
+            )
+            await db.notification_logs.insert_one(log_entry.dict())
+
+    return {"message": "Enrollment updated successfully."}
 
 class StudentEnrollmentCreate(BaseModel):
     course_id: str
@@ -1274,6 +1967,56 @@ async def student_process_payment(
     return {"message": "Payment processed successfully", "payment_id": pending_payment["id"]}
 
 # ATTENDANCE SYSTEM ENDPOINTS
+@api_router.post("/attendance/biometric")
+async def biometric_attendance(
+    attendance_data: BiometricAttendance
+):
+    """
+    Record attendance from a biometric device.
+    This is a mock implementation and assumes the device sends a unique biometric ID.
+    """
+    # 1. Find the user associated with the biometric ID
+    user = await db.users.find_one({"biometric_id": attendance_data.biometric_id, "is_active": True})
+    if not user:
+        # In a real system, you might log this failed attempt.
+        raise HTTPException(status_code=404, detail="User with this biometric ID not found.")
+
+    student_id = user["id"]
+
+    # 2. Find the student's current active enrollment
+    # This is a simplification. A real system might need more logic to determine the correct course.
+    enrollment = await db.enrollments.find_one({"student_id": student_id, "is_active": True})
+    if not enrollment:
+        raise HTTPException(status_code=400, detail="No active enrollment found for this student.")
+
+    # 3. Check if attendance has already been marked for this course today
+    today = attendance_data.timestamp.date()
+    start_of_day = datetime.combine(today, datetime.min.time())
+    end_of_day = datetime.combine(today, datetime.max.time())
+
+    existing_attendance = await db.attendance.find_one({
+        "student_id": student_id,
+        "course_id": enrollment["course_id"],
+        "attendance_date": {"$gte": start_of_day, "$lte": end_of_day}
+    })
+    if existing_attendance:
+        return {"message": "Attendance already marked for today."}
+
+    # 4. Create the attendance record
+    attendance = Attendance(
+        student_id=student_id,
+        course_id=enrollment["course_id"],
+        branch_id=enrollment["branch_id"],
+        attendance_date=attendance_data.timestamp,
+        check_in_time=attendance_data.timestamp,
+        method=AttendanceMethod.BIOMETRIC,
+        notes=f"Biometric check-in from device {attendance_data.device_id}"
+    )
+
+    await db.attendance.insert_one(attendance.dict())
+
+    return {"message": "Attendance marked successfully", "attendance_id": attendance.id}
+
 @api_router.post("/attendance/generate-qr")
 async def generate_attendance_qr(
     course_id: str,
@@ -1417,6 +2160,115 @@ async def get_attendance_reports(
     attendance_records = await db.attendance.find(filter_query).to_list(length=1000)
     return {"attendance_records": serialize_doc(attendance_records)}
 
+@api_router.get("/attendance/reports/export")
+async def export_attendance_reports(
+    student_id: Optional[str] = None,
+    course_id: Optional[str] = None,
+    branch_id: Optional[str] = None,
+    start_date: Optional[datetime] = None,
+    end_date: Optional[datetime] = None,
+    current_user: dict = Depends(get_current_active_user)
+):
+    """Export attendance reports as a CSV file."""
+    filter_query = {}
+
+    if student_id:
+        filter_query["student_id"] = student_id
+    if course_id:
+        filter_query["course_id"] = course_id
+    if branch_id:
+        filter_query["branch_id"] = branch_id
+
+    if start_date and end_date:
+        filter_query["attendance_date"] = {"$gte": start_date, "$lte": end_date}
+
+    if current_user["role"] == "student":
+        filter_query["student_id"] = current_user["id"]
+    elif current_user["role"] == "coach_admin" and current_user.get("branch_id"):
+        filter_query["branch_id"] = current_user["branch_id"]
+
+    attendance_records = await db.attendance.find(filter_query).to_list(length=None)
+
+    output = io.StringIO()
+    writer = csv.writer(output)
+
+    headers = ["attendance_id", "student_id", "course_id", "branch_id", "attendance_date", "check_in_time", "method", "is_present", "notes"]
+    writer.writerow(headers)
+
+    for record in attendance_records:
+        row = [
+            record.get("id"),
+            record.get("student_id"),
+            record.get("course_id"),
+            record.get("branch_id"),
+            record.get("attendance_date"),
+            record.get("check_in_time"),
+            record.get("method"),
+            record.get("is_present"),
+            record.get("notes")
+        ]
+        writer.writerow(row)
+
+    output.seek(0)
+
+    return StreamingResponse(
+        iter([output.getvalue()]),
+        media_type="text/csv",
+        headers={"Content-Disposition": f"attachment; filename=attendance_report_{datetime.now().date()}.csv"}
+    )
+
+@api_router.get("/attendance/anomalies")
+async def get_attendance_anomalies(
+    branch_id: Optional[str] = None,
+    current_user: dict = Depends(require_role([UserRole.SUPER_ADMIN, UserRole.COACH_ADMIN]))
+):
+    """
+    Identifies attendance anomalies, defined as students with 3 or more
+    consecutive absences in any course.
+    """
+    anomaly_filter = {}
+    if branch_id:
+        anomaly_filter["branch_id"] = branch_id
+    if current_user["role"] == UserRole.COACH_ADMIN:
+        # If a branch_id is provided and doesn't match the coach admin's branch, they get nothing.
+        if anomaly_filter.get("branch_id") and anomaly_filter.get("branch_id") != current_user.get("branch_id"):
+            return {"anomalies": []}
+        anomaly_filter["branch_id"] = current_user.get("branch_id")
+
+    # Get all active students, filtered by branch if applicable
+    student_filter = {"role": "student", "is_active": True}
+    if anomaly_filter.get("branch_id"):
+        student_filter["branch_id"] = anomaly_filter["branch_id"]
+
+    students = await db.users.find(student_filter).to_list(length=None)
+
+    anomalies = []
+    for student in students:
+        # Find all courses this student is enrolled in
+        enrollments = await db.enrollments.find({"student_id": student["id"], "is_active": True}).to_list(length=None)
+        course_ids = [e["course_id"] for e in enrollments]
+
+        for course_id in course_ids:
+            # For each course, get the last 3 attendance records
+            recent_attendance = await db.attendance.find(
+                {"student_id": student["id"], "course_id": course_id}
+            ).sort("attendance_date", -1).limit(3).to_list(3)
+
+            if len(recent_attendance) == 3:
+                all_absent = all(not record.get("is_present", True) for record in recent_attendance)
+                if all_absent:
+                    course = await db.courses.find_one({"id": course_id})
+                    if course:
+                        anomalies.append({
+                            "student_name": student["full_name"],
+                            "student_id": student["id"],
+                            "course_name": course["name"],
+                            "course_id": course["id"],
+                            "details": "3 or more consecutive absences detected."
+                        })
+
+    return {"anomalies": anomalies}
+
 # PAYMENT MANAGEMENT ENDPOINTS
 @api_router.post("/payments")
 async def process_payment(
@@ -1545,6 +2397,37 @@ async def get_outstanding_dues(
     
     return {"outstanding_dues": serialize_doc(dues_by_student)}
 
+@api_router.post("/payments/send-reminders")
+async def send_payment_reminders(
+    current_user: dict = Depends(require_role([UserRole.SUPER_ADMIN, UserRole.COACH_ADMIN]))
+):
+    """
+    Find all pending/overdue payments and send reminders.
+    """
+    # Find payments that are pending or overdue
+    due_payments_cursor = db.payments.find({
+        "payment_status": {"$in": [PaymentStatus.PENDING.value, PaymentStatus.OVERDUE.value]}
+    })
+    due_payments = await due_payments_cursor.to_list(length=None)
+
+    if not due_payments:
+        return {"message": "No due payments found to send reminders for."}
+
+    reminders_sent = 0
+    for payment in due_payments:
+        student = await db.users.find_one({"id": payment["student_id"]})
+        if student:
+            message = (
+                f"Hi {student['full_name']}, this is a friendly reminder that your payment of "
+                f"₹{payment['amount']} for enrollment {payment['enrollment_id']} is due on "
+                f"{payment['due_date'].date()}. Thank you."
+            )
+            await send_sms(student["phone"], message)
+            await send_whatsapp(student["phone"], message)
+            reminders_sent += 1
+
+    return {"message": f"Successfully sent {reminders_sent} payment reminders."}
+
 # PRODUCTS/ACCESSORIES MANAGEMENT
 @api_router.post("/products")
 async def create_product(
@@ -1598,6 +2481,35 @@ async def update_product(
         raise HTTPException(status_code=404, detail="Product not found")
 
     return {"message": "Product updated successfully"}
+
+@api_router.post("/products/{product_id}/restock")
+async def restock_product(
+    product_id: str,
+    restock_data: RestockRequest,
+    current_user: dict = Depends(require_role([UserRole.SUPER_ADMIN, UserRole.COACH_ADMIN]))
+):
+    """Restock a product at a specific branch."""
+    # Coach Admins can only restock for their own branch
+    if current_user["role"] == UserRole.COACH_ADMIN:
+        if restock_data.branch_id != current_user.get("branch_id"):
+            raise HTTPException(status_code=403, detail="You can only restock products for your own branch.")
+
+    # Find the product
+    product = await db.products.find_one({"id": product_id})
+    if not product:
+        raise HTTPException(status_code=404, detail="Product not found")
+
+    # Use $inc to atomically update the stock count
+    update_result = await db.products.update_one(
+        {"id": product_id},
+        {"$inc": {f"branch_availability.{restock_data.branch_id}": restock_data.quantity}}
+    )
+
+    if update_result.matched_count == 0:
+        # This should be rare due to the check above
+        raise HTTPException(status_code=404, detail="Product not found during update.")
+
+    return {"message": f"Successfully added {restock_data.quantity} units to product {product['name']} at branch {restock_data.branch_id}."}
 
 @api_router.get("/products/purchases")
 async def get_product_purchases(
@@ -1653,6 +2565,9 @@ async def purchase_product(
         {"$set": {f"branch_availability.{purchase_data.branch_id}": new_stock}}
     )
     
+    # Check for stock alert
+    await check_and_send_stock_alert(product, purchase_data.branch_id, new_stock)
+
     return {"message": "Purchase recorded successfully", "purchase_id": purchase.id, "total_amount": purchase.total_amount}
 
 class StudentProductPurchaseCreate(BaseModel):
@@ -1704,6 +2619,9 @@ async def student_purchase_product(
         {"id": purchase_data.product_id},
         {"$set": {f"branch_availability.{branch_id}": new_stock}}
     )
+
+    # Check for stock alert
+    await check_and_send_stock_alert(product, branch_id, new_stock)
 
     # Create Payment record for the purchase
     payment = Payment(
@@ -1774,8 +2692,13 @@ async def update_complaint(
     complaint_update: ComplaintUpdate,
     current_user: dict = Depends(require_role([UserRole.SUPER_ADMIN, UserRole.COACH_ADMIN]))
 ):
-    """Update complaint status"""
-    update_data = {k: v for k, v in complaint_update.dict().items() if v is not None}
+    """Update complaint status and notify the student."""
+    # Get original complaint to find the student
+    complaint = await db.complaints.find_one({"id": complaint_id})
+    if not complaint:
+        raise HTTPException(status_code=404, detail="Complaint not found")
+
+    update_data = {k: v for k, v in complaint_update.dict(exclude_unset=True).items() if v is not None}
     update_data["updated_at"] = datetime.utcnow()
     
     result = await db.complaints.update_one(
@@ -1784,8 +2707,32 @@ async def update_complaint(
     )
     
     if result.matched_count == 0:
+        # This check is now slightly redundant but safe
         raise HTTPException(status_code=404, detail="Complaint not found")
     
+    # Send notification to the student
+    if complaint_update.status:
+        student = await db.users.find_one({"id": complaint["student_id"]})
+        # This assumes a template with this name exists. It should be created in the DB.
+        template = await db.notification_templates.find_one({"name": "complaint_status_update"})
+        if student and template:
+            body = template["body"].replace("{{subject}}", complaint["subject"]).replace("{{status}}", complaint_update.status.value)
+
+            success = False
+            if template["type"] == NotificationType.WHATSAPP.value:
+                success = await send_whatsapp(student["phone"], body)
+            elif template["type"] == NotificationType.SMS.value:
+                success = await send_sms(student["phone"], body)
+
+            log_entry = NotificationLog(
+                user_id=student["id"],
+                template_id=template["id"],
+                type=template["type"],
+                status="sent" if success else "failed",
+                content=body
+            )
+            await db.notification_logs.insert_one(log_entry.dict())
+
     return {"message": "Complaint updated successfully"}
 
 @api_router.post("/feedback/coaches")
@@ -1862,6 +2809,31 @@ async def get_my_bookings(
     return {"bookings": serialize_doc(bookings)}
 
 # REPORTING & ANALYTICS ENDPOINTS
+@api_router.get("/admin/activity-logs")
+async def get_activity_logs(
+    request: Request,
+    user_id: Optional[str] = None,
+    action: Optional[str] = None,
+    start_date: Optional[datetime] = None,
+    end_date: Optional[datetime] = None,
+    skip: int = 0,
+    limit: int = 100,
+    current_user: dict = Depends(require_role([UserRole.SUPER_ADMIN]))
+):
+    """Get user activity logs (Super Admin only)"""
+    filter_query = {}
+    if user_id:
+        filter_query["user_id"] = user_id
+    if action:
+        filter_query["action"] = action
+    if start_date and end_date:
+        filter_query["timestamp"] = {"$gte": start_date, "$lte": end_date}
+
+    logs = await db.activity_logs.find(filter_query).sort("timestamp", -1).skip(skip).limit(limit).to_list(length=limit)
+    total = await db.activity_logs.count_documents(filter_query)
+
+    return {"logs": serialize_doc(logs), "total": total}
+
 @api_router.get("/reports/dashboard")
 async def get_dashboard_stats(
     branch_id: Optional[str] = None,
@@ -1910,28 +2882,43 @@ async def get_dashboard_stats(
 
 @api_router.get("/reports/financial")
 async def get_financial_report(
+    start_date: Optional[datetime] = None,
+    end_date: Optional[datetime] = None,
     current_user: dict = Depends(require_role([UserRole.SUPER_ADMIN]))
 ):
     """Get a financial report summary."""
-    total_collected = await db.payments.aggregate([
-        {"$match": {"payment_status": PaymentStatus.PAID.value}},
-        {"$group": {"_id": None, "total": {"$sum": "$amount"}}}
-    ]).to_list(1)
+    # Base match query
+    match_query_paid = {"payment_status": PaymentStatus.PAID.value}
+    match_query_pending = {"payment_status": PaymentStatus.PENDING.value}
 
-    pending_payments_cursor = db.payments.find({"payment_status": PaymentStatus.PENDING.value})
-    pending_payments = await pending_payments_cursor.to_list(length=1000)
-    print("Pending payments being aggregated:", pending_payments)
+    # Add date range filter if provided
+    if start_date and end_date:
+        date_filter = {"payment_date": {"$gte": start_date, "$lte": end_date}}
+        match_query_paid.update(date_filter)
+        pending_date_filter = {"due_date": {"$gte": start_date, "$lte": end_date}}
+        match_query_pending.update(pending_date_filter)
 
-    outstanding_dues = await db.payments.aggregate([
-        {"$match": {"payment_status": PaymentStatus.PENDING.value}},
+    total_collected_cursor = db.payments.aggregate([
+        {"$match": match_query_paid},
         {"$group": {"_id": None, "total": {"$sum": "$amount"}}}
-    ]).to_list(1)
+    ])
+    total_collected_list = await total_collected_cursor.to_list(1)
+
+    outstanding_dues_cursor = db.payments.aggregate([
+        {"$match": match_query_pending},
+        {"$group": {"_id": None, "total": {"$sum": "$amount"}}}
+    ])
+    outstanding_dues_list = await outstanding_dues_cursor.to_list(1)
 
     report = {
-        "total_collected": total_collected[0]["total"] if total_collected else 0,
-        "outstanding_dues": outstanding_dues[0]["total"] if outstanding_dues else 0,
+        "total_collected": total_collected_list[0]["total"] if total_collected_list else 0,
+        "outstanding_dues": outstanding_dues_list[0]["total"] if outstanding_dues_list else 0,
         "report_generated_at": datetime.utcnow()
     }
+    if start_date and end_date:
+        report["start_date"] = start_date
+        report["end_date"] = end_date
+
     return report
 
 @api_router.get("/reports/branch/{branch_id}")
@@ -1969,6 +2956,109 @@ async def get_branch_report(
     }
     return report
 
+@api_router.get("/reports/branch/{branch_id}/export")
+async def export_branch_report(
+    branch_id: str,
+    current_user: dict = Depends(require_role([UserRole.SUPER_ADMIN, UserRole.COACH_ADMIN]))
+):
+    """Export a detailed report for a specific branch as a CSV file."""
+    if current_user["role"] == UserRole.COACH_ADMIN and current_user.get("branch_id") != branch_id:
+        raise HTTPException(status_code=403, detail="You can only access reports for your own branch.")
+
+    branch = await db.branches.find_one({"id": branch_id})
+    if not branch:
+        raise HTTPException(status_code=404, detail="Branch not found")
+
+    # Aggregate data for the report (same logic as the JSON endpoint)
+    total_students = await db.users.count_documents({"role": "student", "branch_id": branch_id, "is_active": True})
+    active_enrollments = await db.enrollments.count_documents({"branch_id": branch_id, "is_active": True})
+    payments_summary = await db.payments.aggregate([
+        {"$match": {"student_id": {"$in": [user["id"] for user in await db.users.find({"branch_id": branch_id}).to_list(1000)]}}},
+        {"$group": {"_id": "$payment_status", "total_amount": {"$sum": "$amount"}, "count": {"$sum": 1}}}
+    ]).to_list(1000)
+
+    # Prepare CSV data
+    output = io.StringIO()
+    writer = csv.writer(output)
+
+    writer.writerow(["Report for Branch", branch["name"]])
+    writer.writerow(["Report Generated At", datetime.now().isoformat()])
+    writer.writerow([]) # Spacer
+
+    writer.writerow(["Metric", "Value"])
+    writer.writerow(["Total Students", total_students])
+    writer.writerow(["Active Enrollments", active_enrollments])
+    writer.writerow([]) # Spacer
+
+    writer.writerow(["Payment Status", "Total Amount", "Count"])
+    for summary in payments_summary:
+        writer.writerow([summary["_id"], summary["total_amount"], summary["count"]])
+
+    output.seek(0)
+
+    return StreamingResponse(
+        iter([output.getvalue()]),
+        media_type="text/csv",
+        headers={"Content-Disposition": f"attachment; filename=branch_report_{branch_id}.csv"}
+    )
+
+@api_router.get("/reports/accessory-sales")
+async def get_accessory_sales_report(
+    branch_id: Optional[str] = None,
+    product_id: Optional[str] = None,
+    start_date: Optional[datetime] = None,
+    end_date: Optional[datetime] = None,
+    current_user: dict = Depends(require_role([UserRole.SUPER_ADMIN, UserRole.COACH_ADMIN]))
+):
+    """Get a sales report for accessories."""
+    match_stage = {}
+    if branch_id:
+        match_stage["branch_id"] = branch_id
+    if product_id:
+        match_stage["product_id"] = product_id
+    if start_date and end_date:
+        match_stage["purchase_date"] = {"$gte": start_date, "$lte": end_date}
+
+    if current_user["role"] == UserRole.COACH_ADMIN:
+        if match_stage.get("branch_id") and match_stage["branch_id"] != current_user.get("branch_id"):
+            return {"report": []} # Can't request report for other branches
+        match_stage["branch_id"] = current_user.get("branch_id")
+
+    pipeline = [
+        {"$match": match_stage},
+        {
+            "$group": {
+                "_id": "$product_id",
+                "total_quantity_sold": {"$sum": "$quantity"},
+                "total_revenue": {"$sum": "$total_amount"}
+            }
+        },
+        {
+            "$lookup": {
+                "from": "products",
+                "localField": "_id",
+                "foreignField": "id",
+                "as": "product_details"
+            }
+        },
+        {
+            "$unwind": "$product_details"
+        },
+        {
+            "$project": {
+                "product_id": "$_id",
+                "product_name": "$product_details.name",
+                "total_quantity_sold": "$total_quantity_sold",
+                "total_revenue": "$total_revenue",
+                "_id": 0
+            }
+        },
+        {"$sort": {"total_revenue": -1}}
+    ]
+
+    report = await db.product_purchases.aggregate(pipeline).to_list(length=None)
+    return {"report": report}
+
 # Add middleware and startup
 app.add_middleware(
     CORSMiddleware,
@@ -1984,6 +3074,332 @@ logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
 logger = logging.getLogger(__name__)
+
+# NOTIFICATION MANAGEMENT
+notification_router = APIRouter(prefix="/notifications", tags=["Notifications"])
+
+@notification_router.post("/templates", status_code=status.HTTP_201_CREATED, response_model=NotificationTemplate)
+async def create_notification_template(
+    template_data: NotificationTemplateCreate,
+    current_user: dict = Depends(require_role([UserRole.SUPER_ADMIN]))
+):
+    """Create a new notification template."""
+    template = NotificationTemplate(**template_data.dict())
+    await db.notification_templates.insert_one(template.dict())
+    return template
+
+@notification_router.get("/templates")
+async def get_notification_templates(
+    current_user: dict = Depends(require_role([UserRole.SUPER_ADMIN]))
+):
+    """Get all notification templates."""
+    templates = await db.notification_templates.find().to_list(1000)
+    return {"templates": serialize_doc(templates)}
+
+@notification_router.get("/templates/{template_id}")
+async def get_notification_template(
+    template_id: str,
+    current_user: dict = Depends(require_role([UserRole.SUPER_ADMIN]))
+):
+    """Get a single notification template by ID."""
+    template = await db.notification_templates.find_one({"id": template_id})
+    if not template:
+        raise HTTPException(status_code=404, detail="Template not found")
+    return serialize_doc(template)
+
+@notification_router.put("/templates/{template_id}")
+async def update_notification_template(
+    template_id: str,
+    template_update: NotificationTemplateCreate,
+    current_user: dict = Depends(require_role([UserRole.SUPER_ADMIN]))
+):
+    """Update a notification template."""
+    update_data = template_update.dict()
+    update_data["updated_at"] = datetime.utcnow()
+
+    result = await db.notification_templates.update_one(
+        {"id": template_id},
+        {"$set": update_data}
+    )
+    if result.matched_count == 0:
+        raise HTTPException(status_code=404, detail="Template not found")
+    return {"message": "Template updated successfully"}
+
+@notification_router.delete("/templates/{template_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_notification_template(
+    template_id: str,
+    current_user: dict = Depends(require_role([UserRole.SUPER_ADMIN]))
+):
+    """Delete a notification template."""
+    result = await db.notification_templates.delete_one({"id": template_id})
+    if result.deleted_count == 0:
+        raise HTTPException(status_code=404, detail="Template not found")
+    return
+
+@notification_router.post("/trigger")
+async def trigger_notification(
+    trigger_data: TriggerNotification,
+    current_user: dict = Depends(require_role([UserRole.SUPER_ADMIN, UserRole.COACH_ADMIN]))
+):
+    """Trigger a notification for a specific user using a template."""
+    user = await db.users.find_one({"id": trigger_data.user_id})
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+
+    template = await db.notification_templates.find_one({"id": trigger_data.template_id})
+    if not template:
+        raise HTTPException(status_code=404, detail="Template not found")
+
+    # Render the template
+    body = template["body"]
+    for key, value in trigger_data.context.items():
+        body = body.replace(f"{{{{{key}}}}}", str(value))
+
+    # Send the notification
+    success = False
+    if template["type"] == NotificationType.SMS.value:
+        success = await send_sms(user["phone"], body)
+    elif template["type"] == NotificationType.WHATSAPP.value:
+        success = await send_whatsapp(user["phone"], body)
+
+    # Log the notification attempt
+    log_entry = NotificationLog(
+        user_id=user["id"],
+        template_id=template["id"],
+        type=template["type"],
+        status="sent" if success else "failed",
+        content=body
+    )
+    await db.notification_logs.insert_one(log_entry.dict())
+
+    if not success:
+        raise HTTPException(status_code=500, detail="Failed to send notification.")
+
+    return {"message": "Notification sent successfully."}
+
+@notification_router.post("/broadcast")
+async def broadcast_announcement(
+    broadcast_data: BroadcastAnnouncement,
+    current_user: dict = Depends(require_role([UserRole.SUPER_ADMIN, UserRole.COACH_ADMIN]))
+):
+    """Broadcast a notification to all users or users in a specific branch."""
+    # Coach Admins can only broadcast to their own branch
+    if current_user["role"] == UserRole.COACH_ADMIN:
+        if broadcast_data.branch_id != current_user.get("branch_id"):
+            raise HTTPException(status_code=403, detail="You can only broadcast to your own branch.")
+
+    template = await db.notification_templates.find_one({"id": broadcast_data.template_id})
+    if not template:
+        raise HTTPException(status_code=404, detail="Template not found")
+
+    # Find target users
+    user_filter = {"is_active": True}
+    if broadcast_data.branch_id:
+        user_filter["branch_id"] = broadcast_data.branch_id
+
+    users_to_notify = await db.users.find(user_filter).to_list(length=None)
+
+    # Render the template (context is the same for all users in a broadcast)
+    body = template["body"]
+    if broadcast_data.context:
+        for key, value in broadcast_data.context.items():
+            body = body.replace(f"{{{{{key}}}}}", str(value))
+
+    # Send and log notifications
+    sent_count = 0
+    for user in users_to_notify:
+        success = False
+        if template["type"] == NotificationType.SMS.value:
+            success = await send_sms(user["phone"], body)
+        elif template["type"] == NotificationType.WHATSAPP.value:
+            success = await send_whatsapp(user["phone"], body)
+
+        log_entry = NotificationLog(
+            user_id=user["id"],
+            template_id=template["id"],
+            type=template["type"],
+            status="sent" if success else "failed",
+            content=body
+        )
+        await db.notification_logs.insert_one(log_entry.dict())
+        if success:
+            sent_count += 1
+
+    return {"message": f"Broadcast sent. Attempted to notify {len(users_to_notify)} users, successfully sent to {sent_count}."}
+
+@notification_router.get("/logs")
+async def get_notification_logs(
+    user_id: Optional[str] = None,
+    template_id: Optional[str] = None,
+    status: Optional[str] = None,
+    skip: int = 0,
+    limit: int = 100,
+    current_user: dict = Depends(require_role([UserRole.SUPER_ADMIN, UserRole.COACH_ADMIN]))
+):
+    """Get a log of all notifications that have been sent."""
+    filter_query = {}
+    if user_id:
+        filter_query["user_id"] = user_id
+    if template_id:
+        filter_query["template_id"] = template_id
+    if status:
+        filter_query["status"] = status
+
+    # Coach Admins can only see logs for users in their branch
+    if current_user["role"] == UserRole.COACH_ADMIN:
+        branch_users = await db.users.find({"branch_id": current_user.get("branch_id")}).to_list(length=None)
+        user_ids_in_branch = [user["id"] for user in branch_users]
+
+        if "user_id" in filter_query:
+            # If user_id filter is already present, ensure it's a user in the admin's branch
+            if filter_query["user_id"] not in user_ids_in_branch:
+                return {"logs": [], "total": 0} # Return empty if they ask for a user outside their branch
+        else:
+            filter_query["user_id"] = {"$in": user_ids_in_branch}
+
+    logs = await db.notification_logs.find(filter_query).sort("created_at", -1).skip(skip).limit(limit).to_list(length=limit)
+    total = await db.notification_logs.count_documents(filter_query)
+
+    return {"logs": serialize_doc(logs), "total": total}
+
+@notification_router.get("/my-history")
+async def get_my_notification_history(
+    skip: int = 0,
+    limit: int = 50,
+    current_user: dict = Depends(require_role([UserRole.STUDENT]))
+):
+    """Get the current student's notification history."""
+    filter_query = {"user_id": current_user["id"]}
+
+    logs = await db.notification_logs.find(filter_query).sort("created_at", -1).skip(skip).limit(limit).to_list(length=limit)
+    total = await db.notification_logs.count_documents(filter_query)
+
+    return {"logs": serialize_doc(logs), "total": total}
+
+api_router.include_router(notification_router)
+
+# REMINDERS
+reminders_router = APIRouter(prefix="/reminders", tags=["Reminders"])
+
+@reminders_router.post("/class")
+async def send_class_reminders(
+    reminder_data: ClassReminder,
+    current_user: dict = Depends(require_role([UserRole.SUPER_ADMIN, UserRole.COACH_ADMIN]))
+):
+    """
+    Send class reminders to all students enrolled in a specific course/branch.
+    In a real application, this would be triggered by a scheduler.
+    """
+    # Find the course
+    course = await db.courses.find_one({"id": reminder_data.course_id})
+    if not course:
+        raise HTTPException(status_code=404, detail="Course not found")
+
+    # Find a suitable template
+    template = await db.notification_templates.find_one({"name": "class_reminder"})
+    if not template:
+        raise HTTPException(status_code=404, detail="Notification template 'class_reminder' not found.")
+
+    # Find all active enrollments for this course/branch
+    enrollment_filter = {
+        "course_id": reminder_data.course_id,
+        "branch_id": reminder_data.branch_id,
+        "is_active": True
+    }
+    enrollments = await db.enrollments.find(enrollment_filter).to_list(length=None)
+
+    student_ids = [e["student_id"] for e in enrollments]
+    if not student_ids:
+        return {"message": "No students to remind for this class."}
+
+    students = await db.users.find({"id": {"$in": student_ids}}).to_list(length=None)
+
+    sent_count = 0
+    for student in students:
+        body = template["body"].replace("{{student_name}}", student["full_name"]).replace("{{course_name}}", course["name"])
+
+        success = False
+        if template["type"] == NotificationType.WHATSAPP.value:
+            success = await send_whatsapp(student["phone"], body)
+        elif template["type"] == NotificationType.SMS.value:
+            success = await send_sms(student["phone"], body)
+
+        log_entry = NotificationLog(
+            user_id=student["id"],
+            template_id=template["id"],
+            type=template["type"],
+            status="sent" if success else "failed",
+            content=body
+        )
+        await db.notification_logs.insert_one(log_entry.dict())
+        if success:
+            sent_count += 1
+
+    return {"message": f"Sent {sent_count} class reminders for course '{course['name']}'."}
+
+@reminders_router.post("/attendance")
+async def send_attendance_reminders(
+    current_user: dict = Depends(require_role([UserRole.SUPER_ADMIN, UserRole.COACH_ADMIN]))
+):
+    """
+    Finds students with low attendance and sends them a warning notification.
+    This would be triggered by a scheduler in a real application.
+    """
+    active_enrollments = await db.enrollments.find({"is_active": True}).to_list(length=None)
+    template = await db.notification_templates.find_one({"name": "low_attendance_warning"})
+    if not template:
+        raise HTTPException(status_code=404, detail="Template 'low_attendance_warning' not found.")
+
+    sent_count = 0
+    for enrollment in active_enrollments:
+        course = await db.courses.find_one({"id": enrollment["course_id"]})
+        if not course:
+            continue
+
+        policy = course.get("attendance_policy", {})
+        min_percentage = policy.get("min_percentage")
+
+        if not min_percentage:
+            continue # No policy for this course
+
+        # Calculate attendance percentage
+        total_records = await db.attendance.count_documents({"student_id": enrollment["student_id"], "course_id": enrollment["course_id"]})
+        if total_records == 0:
+            continue
+
+        present_records = await db.attendance.count_documents({"student_id": enrollment["student_id"], "course_id": enrollment["course_id"], "is_present": True})
+
+        attendance_percentage = (present_records / total_records) * 100
+
+        if attendance_percentage < min_percentage:
+            student = await db.users.find_one({"id": enrollment["student_id"]})
+            if student:
+                body = template["body"].replace("{{student_name}}", student["full_name"])
+                body = body.replace("{{course_name}}", course["name"])
+                body = body.replace("{{attendance_percentage}}", f"{attendance_percentage:.1f}%")
+
+                success = False
+                if template["type"] == NotificationType.WHATSAPP.value:
+                    success = await send_whatsapp(student["phone"], body)
+                elif template["type"] == NotificationType.SMS.value:
+                    success = await send_sms(student["phone"], body)
+
+                # Log it
+                log_entry = NotificationLog(
+                    user_id=student["id"],
+                    template_id=template["id"],
+                    type=template["type"],
+                    status="sent" if success else "failed",
+                    content=body
+                )
+                await db.notification_logs.insert_one(log_entry.dict())
+                if success:
+                    sent_count += 1
+
+    return {"message": f"Sent {sent_count} low attendance warnings."}
+
+api_router.include_router(reminders_router)
+
 
 # Include API routes
 app.include_router(api_router)
